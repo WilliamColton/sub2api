@@ -107,6 +107,12 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		}
 	}
 
+	// 4b. Ensure reasoning_content is present on all assistant messages when
+	// thinking mode is active. DeepSeek requires this field to be passed back
+	// in multi-turn conversations; missing fields cause 400:
+	// "The reasoning_content in the thinking mode must be passed back to the API."
+	upstreamBody = ensureReasoningContentInAssistantMessages(upstreamBody)
+
 	logger.L().Debug("openai chat_completions raw: forwarding without protocol conversion",
 		zap.Int64("account_id", account.ID),
 		zap.String("original_model", originalModel),
@@ -438,4 +444,59 @@ func buildOpenAIChatCompletionsURL(base string) string {
 		return normalized + "/chat/completions"
 	}
 	return normalized + "/v1/chat/completions"
+}
+
+// ensureReasoningContentInAssistantMessages ensures every assistant message
+// carries a reasoning_content field when reasoning/thinking mode is active.
+//
+// DeepSeek requires reasoning_content to be present in all assistant messages
+// during multi-turn conversations; missing fields cause a 400 error:
+// "The reasoning_content in the thinking mode must be passed back to the API."
+// An empty string satisfies the requirement.
+//
+// Detection covers three formats:
+//   - thinking.type = "enabled" | "auto" (DeepSeek native)
+//   - reasoning_effort / reasoning.effort (OpenAI-compatible)
+//   - thinking object present at top level (DeepSeek alternate)
+func ensureReasoningContentInAssistantMessages(body []byte) []byte {
+	// Determine whether thinking/reasoning mode is active.
+	thinkingType := strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())
+	hasThinking := thinkingType == "enabled" || thinkingType == "auto"
+	hasReasoningEffort := strings.TrimSpace(gjson.GetBytes(body, "reasoning_effort").String()) != "" ||
+		strings.TrimSpace(gjson.GetBytes(body, "reasoning.effort").String()) != ""
+	hasThinkingObject := gjson.GetBytes(body, "thinking").Exists()
+
+	if !hasThinking && !hasReasoningEffort && !hasThinkingObject {
+		return body
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return body
+	}
+
+	result := body
+	modified := false
+	for i, msg := range messages.Array() {
+		if msg.Get("role").String() != "assistant" {
+			continue
+		}
+		if msg.Get("reasoning_content").Exists() {
+			continue
+		}
+		var err error
+		result, err = sjson.SetBytes(result, fmt.Sprintf("messages.%d.reasoning_content", i), "")
+		if err != nil {
+			return body
+		}
+		modified = true
+	}
+
+	if modified {
+		logger.L().Debug("openai chat_completions raw: injected missing reasoning_content",
+			zap.Int("message_count", len(messages.Array())),
+		)
+	}
+
+	return result
 }
