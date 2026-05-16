@@ -17,6 +17,7 @@ import (
 const (
 	EndpointMessages          = "/v1/messages"
 	EndpointChatCompletions   = "/v1/chat/completions"
+	EndpointCompletions       = "/v1/completions"
 	EndpointResponses         = "/v1/responses"
 	EndpointImagesGenerations = "/v1/images/generations"
 	EndpointImagesEdits       = "/v1/images/edits"
@@ -44,6 +45,8 @@ func NormalizeInboundEndpoint(path string) string {
 	switch {
 	case strings.Contains(path, EndpointChatCompletions):
 		return EndpointChatCompletions
+	case strings.Contains(path, EndpointCompletions):
+		return EndpointCompletions
 	case strings.Contains(path, EndpointMessages):
 		return EndpointMessages
 	case strings.Contains(path, EndpointImagesGenerations) || strings.Contains(path, "/images/generations"):

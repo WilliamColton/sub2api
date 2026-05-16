@@ -2863,7 +2863,7 @@ export default {
       types: {
         oauth: 'OAuth',
         chatgptOauth: 'ChatGPT OAuth',
-        responsesApi: 'Responses API',
+        responsesApi: 'Responses / Chat / Completions',
         googleOauth: 'Google OAuth',
         codeAssist: 'Code Assist',
         antigravityOauth: 'Antigravity OAuth',
@@ -3146,6 +3146,13 @@ export default {
         wsModeConcurrencyHint:
           'When WS mode is enabled, account concurrency becomes the WS connection pool limit for this account.',
         wsModePassthroughHint: 'Passthrough mode does not use the WS connection pool.',
+        upstreamAPI: 'Upstream API',
+        upstreamAPIDesc:
+          'Only applies to OpenAI API Key accounts. Auto selects the upstream protocol from probe results; choose Legacy Completions when the upstream only supports /v1/completions.',
+        upstreamAPIAuto: 'Auto',
+        upstreamAPIResponses: 'Responses API (/v1/responses)',
+        upstreamAPIChatCompletions: 'Chat Completions (/v1/chat/completions)',
+        upstreamAPILegacyCompletions: 'Legacy Completions (/v1/completions)',
         oauthResponsesWebsocketsV2: 'OAuth WebSocket Mode',
         oauthResponsesWebsocketsV2Desc:
           'Only applies to OpenAI OAuth. This account can use OpenAI WebSocket Mode only when enabled.',

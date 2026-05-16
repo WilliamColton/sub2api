@@ -3048,7 +3048,7 @@ export default {
       types: {
         oauth: 'OAuth',
         chatgptOauth: 'ChatGPT OAuth',
-        responsesApi: 'Responses API',
+        responsesApi: 'Responses / Chat / Completions',
         googleOauth: 'Google OAuth',
         codeAssist: 'Code Assist',
         antigravityOauth: 'Antigravity OAuth',
@@ -3293,6 +3293,12 @@ export default {
         wsModeDedicated: '独享（dedicated）',
         wsModeConcurrencyHint: '启用 WS mode 后，该账号并发数将作为该账号 WS 连接池上限。',
         wsModePassthroughHint: 'passthrough 模式不使用 WS 连接池。',
+        upstreamAPI: '上游协议',
+        upstreamAPIDesc: '仅对 OpenAI API Key 生效。自动会按探测结果选择上游协议；当上游只支持旧版 /v1/completions 时选择 Legacy Completions。',
+        upstreamAPIAuto: '自动',
+        upstreamAPIResponses: 'Responses API (/v1/responses)',
+        upstreamAPIChatCompletions: 'Chat Completions (/v1/chat/completions)',
+        upstreamAPILegacyCompletions: 'Legacy Completions (/v1/completions)',
         oauthResponsesWebsocketsV2: 'OAuth WebSocket Mode',
         oauthResponsesWebsocketsV2Desc:
           '仅对 OpenAI OAuth 生效。开启后该账号才允许使用 OpenAI WebSocket Mode 协议。',

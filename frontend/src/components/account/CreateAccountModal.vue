@@ -1044,6 +1044,12 @@
           <p class="input-hint">{{ apiKeyHint }}</p>
         </div>
 
+        <div v-if="form.platform === 'openai'">
+          <label class="input-label">{{ t('admin.accounts.openai.upstreamAPI') }}</label>
+          <Select v-model="openAIUpstreamAPI" :options="openAIUpstreamAPIOptions" />
+          <p class="input-hint">{{ t('admin.accounts.openai.upstreamAPIDesc') }}</p>
+        </div>
+
         <!-- Gemini API Key tier selection -->
         <div v-if="form.platform === 'gemini'">
           <label class="input-label">{{ t('admin.accounts.gemini.tier.label') }}</label>
@@ -3122,7 +3128,8 @@ import type {
   CheckMixedChannelResponse,
   CreateAccountRequest,
   CodexSessionImportMessage,
-  OpenAICompactMode
+  OpenAICompactMode,
+  OpenAIUpstreamAPI
 } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -3279,6 +3286,7 @@ const interceptWarmupRequests = ref(false)
 const autoPauseOnExpired = ref(true)
 const openaiPassthroughEnabled = ref(false)
 const openAICompactMode = ref<OpenAICompactMode>('auto')
+const openAIUpstreamAPI = ref<OpenAIUpstreamAPI>('auto')
 const openaiOAuthResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OFF)
 const codexCLIOnlyEnabled = ref(false)
@@ -3335,6 +3343,12 @@ const openAICompactModeOptions = computed(() => [
   { value: 'auto', label: t('admin.accounts.openai.compactModeAuto') },
   { value: 'force_on', label: t('admin.accounts.openai.compactModeForceOn') },
   { value: 'force_off', label: t('admin.accounts.openai.compactModeForceOff') }
+])
+const openAIUpstreamAPIOptions = computed(() => [
+  { value: 'auto', label: t('admin.accounts.openai.upstreamAPIAuto') },
+  { value: 'responses', label: t('admin.accounts.openai.upstreamAPIResponses') },
+  { value: 'chat_completions', label: t('admin.accounts.openai.upstreamAPIChatCompletions') },
+  { value: 'legacy_completions', label: t('admin.accounts.openai.upstreamAPILegacyCompletions') }
 ])
 
 function buildAntigravityExtra(): Record<string, unknown> | undefined {
@@ -3645,6 +3659,7 @@ watch(
     }
     if (newPlatform !== 'openai') {
       openaiPassthroughEnabled.value = false
+      openAIUpstreamAPI.value = 'auto'
       openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
       openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
       codexCLIOnlyEnabled.value = false
@@ -4042,6 +4057,7 @@ const resetForm = () => {
   autoPauseOnExpired.value = true
   openaiPassthroughEnabled.value = false
   openAICompactMode.value = 'auto'
+  openAIUpstreamAPI.value = 'auto'
   openaiOAuthResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
   codexCLIOnlyEnabled.value = false
@@ -4127,6 +4143,11 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     extra.openai_compact_mode = openAICompactMode.value
   } else {
     delete extra.openai_compact_mode
+  }
+  if (accountCategory.value === 'apikey' && openAIUpstreamAPI.value !== 'auto') {
+    extra.openai_upstream_api = openAIUpstreamAPI.value
+  } else {
+    delete extra.openai_upstream_api
   }
 
   return Object.keys(extra).length > 0 ? extra : undefined

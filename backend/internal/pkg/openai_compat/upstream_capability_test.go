@@ -53,3 +53,34 @@ func TestShouldUseResponsesAPI(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveChatCompletionsUpstreamAPI(t *testing.T) {
+	tests := []struct {
+		name  string
+		extra map[string]any
+		want  OpenAIUpstreamAPI
+	}{
+		{"nil extra defaults to responses", nil, OpenAIUpstreamAPIResponses},
+		{"empty extra defaults to responses", map[string]any{}, OpenAIUpstreamAPIResponses},
+		{"responses supported defaults to responses", map[string]any{ExtraKeyResponsesSupported: true}, OpenAIUpstreamAPIResponses},
+		{"responses unsupported defaults to chat completions", map[string]any{ExtraKeyResponsesSupported: false}, OpenAIUpstreamAPIChatCompletions},
+		{"explicit legacy completions wins over missing probe", map[string]any{ExtraKeyUpstreamAPI: "legacy_completions"}, OpenAIUpstreamAPILegacyCompletions},
+		{"explicit legacy completions wins over supported probe", map[string]any{ExtraKeyUpstreamAPI: "legacy_completions", ExtraKeyResponsesSupported: true}, OpenAIUpstreamAPILegacyCompletions},
+		{"explicit legacy completions wins over unsupported probe", map[string]any{ExtraKeyUpstreamAPI: "legacy_completions", ExtraKeyResponsesSupported: false}, OpenAIUpstreamAPILegacyCompletions},
+		{"explicit chat completions wins over supported probe", map[string]any{ExtraKeyUpstreamAPI: "chat_completions", ExtraKeyResponsesSupported: true}, OpenAIUpstreamAPIChatCompletions},
+		{"explicit responses wins over unsupported probe", map[string]any{ExtraKeyUpstreamAPI: "responses", ExtraKeyResponsesSupported: false}, OpenAIUpstreamAPIResponses},
+		{"explicit value is trimmed and case insensitive", map[string]any{ExtraKeyUpstreamAPI: " Legacy_Completions "}, OpenAIUpstreamAPILegacyCompletions},
+		{"auto follows unsupported probe", map[string]any{ExtraKeyUpstreamAPI: "auto", ExtraKeyResponsesSupported: false}, OpenAIUpstreamAPIChatCompletions},
+		{"unknown explicit value follows probe", map[string]any{ExtraKeyUpstreamAPI: "completions", ExtraKeyResponsesSupported: false}, OpenAIUpstreamAPIChatCompletions},
+		{"non string explicit value follows probe", map[string]any{ExtraKeyUpstreamAPI: 1, ExtraKeyResponsesSupported: false}, OpenAIUpstreamAPIChatCompletions},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveChatCompletionsUpstreamAPI(tc.extra)
+			if got != tc.want {
+				t.Errorf("ResolveChatCompletionsUpstreamAPI(%v) = %v, want %v", tc.extra, got, tc.want)
+			}
+		})
+	}
+}

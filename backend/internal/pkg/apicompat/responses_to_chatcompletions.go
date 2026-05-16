@@ -10,6 +10,194 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// Request conversion: ResponsesRequest → ChatCompletionsRequest
+// ---------------------------------------------------------------------------
+
+// ResponsesRequestToChatCompletions converts a Responses API request into a
+// Chat Completions request. This is used when the upstream only supports
+// /v1/chat/completions (e.g., DeepSeek, Kimi, GLM, Qwen).
+func ResponsesRequestToChatCompletions(req *ResponsesRequest) (*ChatCompletionsRequest, error) {
+	messages, err := convertResponsesInputToChatMessages(req.Input, req.Instructions)
+	if err != nil {
+		return nil, fmt.Errorf("convert responses input to chat messages: %w", err)
+	}
+
+	out := &ChatCompletionsRequest{
+		Model:       req.Model,
+		Messages:    messages,
+		Temperature: req.Temperature,
+		TopP:        req.TopP,
+		Stream:      req.Stream,
+		ServiceTier: req.ServiceTier,
+	}
+
+	if req.MaxOutputTokens != nil {
+		out.MaxTokens = req.MaxOutputTokens
+	}
+
+	if len(req.Tools) > 0 {
+		out.Tools = convertResponsesToolsToChatTools(req.Tools)
+	}
+
+	if req.ToolChoice != nil {
+		out.ToolChoice = req.ToolChoice
+	}
+
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		out.ReasoningEffort = req.Reasoning.Effort
+	}
+
+	return out, nil
+}
+
+func convertResponsesInputToChatMessages(input json.RawMessage, instructions string) ([]ChatMessage, error) {
+	var messages []ChatMessage
+
+	// Add instructions as system message
+	if instructions != "" {
+		messages = append(messages, ChatMessage{
+			Role:    "system",
+			Content: json.RawMessage(`"` + instructions + `"`),
+		})
+	}
+
+	// Try to parse as array of ResponsesInputItem
+	var items []ResponsesInputItem
+	if err := json.Unmarshal(input, &items); err != nil {
+		// Try to parse as plain string
+		var s string
+		if err2 := json.Unmarshal(input, &s); err2 != nil {
+			return nil, fmt.Errorf("unmarshal responses input: %w", err)
+		}
+		if s != "" {
+			messages = append(messages, ChatMessage{
+				Role:    "user",
+				Content: json.RawMessage(`"` + s + `"`),
+			})
+		}
+		return messages, nil
+	}
+
+	for _, item := range items {
+		switch item.Type {
+		case "function_call":
+			messages = append(messages, ChatMessage{
+				Role:      "assistant",
+				ToolCalls: []ChatToolCall{{
+					ID:   item.CallID,
+					Type: "function",
+					Function: ChatFunctionCall{
+						Name:      item.Name,
+						Arguments: item.Arguments,
+					},
+				}},
+			})
+		case "function_call_output":
+			messages = append(messages, ChatMessage{
+				Role:       "tool",
+				Content:    json.RawMessage(`"` + item.Output + `"`),
+				ToolCallID: item.CallID,
+			})
+		default:
+			// Role-based messages (developer/system/user/assistant)
+			role := item.Role
+			if role == "" {
+				role = "user"
+			}
+			if role == "developer" {
+				role = "system"
+			}
+
+			content := convertResponsesContentToChatContent(item.Content)
+			messages = append(messages, ChatMessage{
+				Role:    role,
+				Content: content,
+			})
+		}
+	}
+
+	return messages, nil
+}
+
+// convertResponsesContentToChatContent converts Responses API content format
+// to Chat Completions content format. The key difference is:
+// - Responses uses "input_text", "output_text", "input_image"
+// - Chat Completions uses "text", "image_url"
+func convertResponsesContentToChatContent(content json.RawMessage) json.RawMessage {
+	if content == nil {
+		return json.RawMessage(`""`)
+	}
+
+	// Try to parse as string (simple case)
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		return content
+	}
+
+	// Try to parse as array of content parts
+	var parts []ResponsesContentPart
+	if err := json.Unmarshal(content, &parts); err != nil {
+		// Return as-is if we can't parse it
+		return content
+	}
+
+	// Convert to ChatContentPart format
+	var chatParts []ChatContentPart
+	for _, part := range parts {
+		switch part.Type {
+		case "input_text", "output_text":
+			chatParts = append(chatParts, ChatContentPart{
+				Type: "text",
+				Text: part.Text,
+			})
+		case "input_image":
+			chatParts = append(chatParts, ChatContentPart{
+				Type: "image_url",
+				ImageURL: &ChatImageURL{
+					URL: part.ImageURL,
+				},
+			})
+		default:
+			// Pass through unknown types as text
+			chatParts = append(chatParts, ChatContentPart{
+				Type: "text",
+				Text: part.Text,
+			})
+		}
+	}
+
+	if len(chatParts) == 0 {
+		return json.RawMessage(`""`)
+	}
+
+	result, err := json.Marshal(chatParts)
+	if err != nil {
+		return json.RawMessage(`""`)
+	}
+	return result
+}
+
+func convertResponsesToolsToChatTools(tools []ResponsesTool) []ChatTool {
+	var chatTools []ChatTool
+	for _, t := range tools {
+		if t.Type == "function" {
+			chatTools = append(chatTools, ChatTool{
+				Type: "function",
+				Function: &ChatFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.Parameters,
+					Strict:      t.Strict,
+				},
+			})
+		}
+		// Skip non-function tools (web_search, local_shell, etc.) as they
+		// don't have a direct Chat Completions equivalent
+	}
+	return chatTools
+}
+
+// ---------------------------------------------------------------------------
 // Non-streaming: ResponsesResponse → ChatCompletionsResponse
 // ---------------------------------------------------------------------------
 

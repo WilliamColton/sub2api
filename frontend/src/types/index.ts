@@ -970,6 +970,7 @@ export interface CodexUsageSnapshot {
 }
 
 export type OpenAICompactMode = 'auto' | 'force_on' | 'force_off'
+export type OpenAIUpstreamAPI = 'auto' | 'responses' | 'chat_completions' | 'legacy_completions'
 
 export interface OpenAICompactState {
   openai_compact_mode?: OpenAICompactMode

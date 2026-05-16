@@ -17,6 +17,8 @@
 //     pensieve/short-term/maxims/preserve-existing-runtime-behavior-when-replacing-logic-in-stateful-systems）
 package openai_compat
 
+import "strings"
+
 // AccountResponsesSupport 描述账号上游对 OpenAI Responses API 的支持状态。
 //
 // 仅用于 platform=openai + type=apikey 的账号；其他账号类型不应调用本包判定。
@@ -35,9 +37,22 @@ const (
 	ResponsesSupportNo
 )
 
+// OpenAIUpstreamAPI 描述 OpenAI Chat Completions 入站请求应使用的上游协议。
+type OpenAIUpstreamAPI string
+
+const (
+	OpenAIUpstreamAPIAuto              OpenAIUpstreamAPI = "auto"
+	OpenAIUpstreamAPIResponses         OpenAIUpstreamAPI = "responses"
+	OpenAIUpstreamAPIChatCompletions   OpenAIUpstreamAPI = "chat_completions"
+	OpenAIUpstreamAPILegacyCompletions OpenAIUpstreamAPI = "legacy_completions"
+)
+
 // ExtraKeyResponsesSupported 是 accounts.extra JSON 中存储探测结果的键名。
 // 值类型为 bool：true=支持、false=不支持、键缺失=未探测。
 const ExtraKeyResponsesSupported = "openai_responses_supported"
+
+// ExtraKeyUpstreamAPI 是 accounts.extra JSON 中显式指定上游 OpenAI 协议的键名。
+const ExtraKeyUpstreamAPI = "openai_upstream_api"
 
 // ResolveResponsesSupport 从账号的 extra map 中读取探测标记。
 //
@@ -72,4 +87,36 @@ func ResolveResponsesSupport(extra map[string]any) AccountResponsesSupport {
 // （详见 internal/service/openai_gateway_chat_completions_raw.go）。
 func ShouldUseResponsesAPI(extra map[string]any) bool {
 	return ResolveResponsesSupport(extra) != ResponsesSupportNo
+}
+
+// ResolveChatCompletionsUpstreamAPI 判断 OpenAI APIKey 账号的入站
+// /v1/chat/completions 请求最终应转发到哪一种上游协议。
+func ResolveChatCompletionsUpstreamAPI(extra map[string]any) OpenAIUpstreamAPI {
+	if explicit := resolveExplicitUpstreamAPI(extra); explicit != OpenAIUpstreamAPIAuto {
+		return explicit
+	}
+	if ShouldUseResponsesAPI(extra) {
+		return OpenAIUpstreamAPIResponses
+	}
+	return OpenAIUpstreamAPIChatCompletions
+}
+
+func resolveExplicitUpstreamAPI(extra map[string]any) OpenAIUpstreamAPI {
+	if extra == nil {
+		return OpenAIUpstreamAPIAuto
+	}
+	value, ok := extra[ExtraKeyUpstreamAPI].(string)
+	if !ok {
+		return OpenAIUpstreamAPIAuto
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(OpenAIUpstreamAPIResponses):
+		return OpenAIUpstreamAPIResponses
+	case string(OpenAIUpstreamAPIChatCompletions):
+		return OpenAIUpstreamAPIChatCompletions
+	case string(OpenAIUpstreamAPILegacyCompletions):
+		return OpenAIUpstreamAPILegacyCompletions
+	default:
+		return OpenAIUpstreamAPIAuto
+	}
 }

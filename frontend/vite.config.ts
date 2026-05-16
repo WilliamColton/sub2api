@@ -34,11 +34,17 @@ function injectPublicSettings(backendUrl: string): Plugin {
   }
 }
 
+const formatBuildId = (date: Date) => {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}`
+}
+
 export default defineConfig(({ mode }) => {
   // 加载环境变量
   const env = loadEnv(mode, process.cwd(), '')
   const backendUrl = env.VITE_DEV_PROXY_TARGET || 'http://localhost:8080'
   const devPort = Number(env.VITE_DEV_PORT || 3000)
+  const frontendBuildId = env.VITE_FRONTEND_BUILD_ID || formatBuildId(new Date())
 
   return {
     plugins: [
@@ -58,7 +64,8 @@ export default defineConfig(({ mode }) => {
   define: {
     // 启用 vue-i18n JIT 编译，在 CSP 环境下处理消息插值
     // JIT 编译器生成 AST 对象而非 JS 代码，无需 unsafe-eval
-    __INTLIFY_JIT_COMPILATION__: true
+    __INTLIFY_JIT_COMPILATION__: true,
+    __FRONTEND_BUILD_ID__: JSON.stringify(frontendBuildId)
   },
   build: {
     outDir: '../backend/internal/web/dist',

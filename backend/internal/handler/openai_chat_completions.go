@@ -256,7 +256,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		userAgent := c.GetHeader("User-Agent")
 		clientIP := ip.GetClientIP(c)
 		inboundEndpoint := GetInboundEndpoint(c)
-		upstreamEndpoint := resolveRawCCUpstreamEndpoint(c, account)
+		upstreamEndpoint := resolveOpenAIChatCompletionsUpstreamEndpoint(c, account)
 
 		h.submitOpenAIUsageRecordTask(result, func(ctx context.Context) {
 			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
@@ -290,15 +290,16 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 }
 
-// resolveRawCCUpstreamEndpoint returns the actual upstream endpoint for
-// OpenAI Chat Completions requests. For APIKey accounts whose upstream
-// has been probed to not support the Responses API, the request is
-// forwarded directly to /v1/chat/completions — not through the default
-// CC→Responses conversion path.
-func resolveRawCCUpstreamEndpoint(c *gin.Context, account *service.Account) string {
-	if account != nil && account.Type == service.AccountTypeAPIKey &&
-		!openai_compat.ShouldUseResponsesAPI(account.Extra) {
-		return "/v1/chat/completions"
+// resolveOpenAIChatCompletionsUpstreamEndpoint returns the actual upstream endpoint for
+// OpenAI Chat Completions requests after account-level upstream protocol selection.
+func resolveOpenAIChatCompletionsUpstreamEndpoint(c *gin.Context, account *service.Account) string {
+	if account != nil && account.Type == service.AccountTypeAPIKey {
+		switch openai_compat.ResolveChatCompletionsUpstreamAPI(account.Extra) {
+		case openai_compat.OpenAIUpstreamAPILegacyCompletions:
+			return EndpointCompletions
+		case openai_compat.OpenAIUpstreamAPIChatCompletions:
+			return EndpointChatCompletions
+		}
 	}
 	return GetUpstreamEndpoint(c, account.Platform)
 }

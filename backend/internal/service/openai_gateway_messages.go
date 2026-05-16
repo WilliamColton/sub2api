@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -25,6 +28,10 @@ import (
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
 // the response back to Anthropic Messages format. This enables Claude Code
 // clients to access OpenAI models through the standard /v1/messages endpoint.
+//
+// For APIKey accounts whose upstream only supports /v1/chat/completions
+// (detected via account.extra), the request is converted to Chat Completions
+// format and forwarded to the chat/completions endpoint instead.
 func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	ctx context.Context,
 	c *gin.Context,
@@ -33,6 +40,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	// 入口分流：APIKey 账号按 extra 能力选择上游协议。
+	// 当上游不支持 Responses API 时，走 Chat Completions 直转路径。
+	if account.Type == AccountTypeAPIKey {
+		if openai_compat.ResolveChatCompletionsUpstreamAPI(account.Extra) == openai_compat.OpenAIUpstreamAPIChatCompletions {
+			return s.forwardAsAnthropicViaChatCompletions(ctx, c, account, body, defaultMappedModel)
+		}
+	}
+
 	startTime := time.Now()
 
 	// 1. Parse Anthropic request
@@ -926,4 +941,480 @@ func copyOpenAIUsageFromResponsesUsage(usage *apicompat.ResponsesUsage) OpenAIUs
 		result.CacheReadInputTokens = usage.InputTokensDetails.CachedTokens
 	}
 	return result
+}
+
+// forwardAsAnthropicViaChatCompletions handles Anthropic Messages requests when
+// the upstream only supports /v1/chat/completions. It converts the Anthropic
+// request to Chat Completions format, forwards to the upstream, and converts
+// the response back to Anthropic Messages format.
+func (s *OpenAIGatewayService) forwardAsAnthropicViaChatCompletions(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	body []byte,
+	defaultMappedModel string,
+) (*OpenAIForwardResult, error) {
+	startTime := time.Now()
+
+	// 1. Parse Anthropic request
+	var anthropicReq apicompat.AnthropicRequest
+	if err := json.Unmarshal(body, &anthropicReq); err != nil {
+		return nil, fmt.Errorf("parse anthropic request: %w", err)
+	}
+	originalModel := anthropicReq.Model
+	clientStream := anthropicReq.Stream
+
+	// 2. Model mapping
+	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
+	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
+
+	// 3. Convert Anthropic → Responses → Chat Completions
+	anthropicReq.Model = upstreamModel
+	responsesReq, err := apicompat.AnthropicToResponses(&anthropicReq)
+	if err != nil {
+		return nil, fmt.Errorf("convert anthropic to responses: %w", err)
+	}
+	responsesReq.Stream = true // upstream always streams
+
+	chatReq, err := apicompat.ResponsesRequestToChatCompletions(responsesReq)
+	if err != nil {
+		return nil, fmt.Errorf("convert responses to chat completions: %w", err)
+	}
+
+	// Ensure stream_options.include_usage for billing
+	if chatReq.Stream {
+		if chatReq.StreamOptions == nil {
+			chatReq.StreamOptions = &apicompat.ChatStreamOptions{}
+		}
+		chatReq.StreamOptions.IncludeUsage = true
+	}
+
+	chatBody, err := json.Marshal(chatReq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal chat completions request: %w", err)
+	}
+
+	// 4. Get access token
+	token, _, err := s.GetAccessToken(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+
+	// 5. Build upstream request to /v1/chat/completions
+	baseURL := account.GetOpenAIBaseURL()
+	if baseURL == "" {
+		baseURL = "https://api.openai.com"
+	}
+	validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base_url: %w", err)
+	}
+	targetURL := buildOpenAIChatCompletionsURL(validatedURL)
+
+	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, bytes.NewReader(chatBody))
+	releaseUpstreamCtx()
+	if err != nil {
+		return nil, fmt.Errorf("build upstream request: %w", err)
+	}
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+token)
+	upstreamReq.Header.Set("Accept", "text/event-stream")
+
+	customUA := account.GetOpenAIUserAgent()
+	if customUA != "" {
+		upstreamReq.Header.Set("user-agent", customUA)
+	}
+
+	// 6. Send request
+	proxyURL := ""
+	if account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	if err != nil {
+		safeErr := sanitizeUpstreamErrorMessage(err.Error())
+		setOpsUpstreamError(c, 0, safeErr, "")
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: 0,
+			Kind:               "request_error",
+			Message:            safeErr,
+		})
+		writeAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed")
+		return nil, fmt.Errorf("upstream request failed: %s", safeErr)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// 7. Handle error response with failover
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+		if s.shouldFailoverOpenAIUpstreamResponse(resp.StatusCode, upstreamMsg, respBody) {
+			upstreamDetail := ""
+			if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+				maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+				if maxBytes <= 0 {
+					maxBytes = 2048
+				}
+				upstreamDetail = truncateString(string(respBody), maxBytes)
+			}
+			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+				Platform:           account.Platform,
+				AccountID:          account.ID,
+				AccountName:        account.Name,
+				UpstreamStatusCode: resp.StatusCode,
+				UpstreamRequestID:  resp.Header.Get("x-request-id"),
+				Kind:               "failover",
+				Message:            upstreamMsg,
+				Detail:             upstreamDetail,
+			})
+			if s.rateLimitService != nil {
+				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			}
+			return nil, &UpstreamFailoverError{
+				StatusCode:             resp.StatusCode,
+				ResponseBody:           respBody,
+				RetryableOnSameAccount: account.IsPoolMode() && (isPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
+			}
+		}
+		return s.handleAnthropicErrorResponse(resp, c, account)
+	}
+
+	// 8. Handle normal response
+	logFields := []zap.Field{
+		zap.Int64("account_id", account.ID),
+		zap.String("original_model", originalModel),
+		zap.String("billing_model", billingModel),
+		zap.String("upstream_model", upstreamModel),
+		zap.Bool("stream", clientStream),
+		zap.Bool("via_chat_completions", true),
+	}
+	logger.L().Debug("openai messages: forwarding via chat completions", logFields...)
+
+	var result *OpenAIForwardResult
+	var handleErr error
+	if clientStream {
+		result, handleErr = s.handleAnthropicStreamingFromChatCompletions(resp, c, originalModel, billingModel, upstreamModel, startTime)
+	} else {
+		result, handleErr = s.handleAnthropicBufferedFromChatCompletions(resp, c, originalModel, billingModel, upstreamModel, startTime)
+	}
+
+	return result, handleErr
+}
+
+// handleAnthropicStreamingFromChatCompletions converts Chat Completions SSE
+// events to Anthropic Messages SSE events and streams them to the client.
+func (s *OpenAIGatewayService) handleAnthropicStreamingFromChatCompletions(
+	resp *http.Response,
+	c *gin.Context,
+	originalModel, billingModel, upstreamModel string,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	// Send message_start event
+	messageID := "msg_" + generateAnthropicMessageID()
+	fmt.Fprintf(c.Writer, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"%s\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"%s\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n",
+		messageID, originalModel)
+	c.Writer.Flush()
+
+	scanner := bufio.NewScanner(resp.Body)
+	maxLineSize := defaultMaxLineSize
+	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = s.cfg.Gateway.MaxLineSize
+	}
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+
+	var usage OpenAIUsage
+	var firstTokenMs *int
+	clientDisconnected := false
+	contentBlockIndex := 0
+	inContentBlock := false
+	stopReason := ""
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		payload, ok := extractOpenAISSEDataLine(line)
+		if !ok {
+			continue
+		}
+
+		trimmedPayload := strings.TrimSpace(payload)
+		if trimmedPayload == "[DONE]" {
+			break
+		}
+
+		// Parse Chat Completions chunk
+		var chunk apicompat.ChatCompletionsChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+
+		// Extract usage from final chunk
+		if chunk.Usage != nil {
+			usage.InputTokens = chunk.Usage.PromptTokens
+			usage.OutputTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.PromptTokensDetails != nil {
+				usage.CacheReadInputTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
+		}
+
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		choice := chunk.Choices[0]
+		delta := choice.Delta
+
+		if firstTokenMs == nil && (delta.Content != nil || len(delta.ToolCalls) > 0) {
+			elapsed := int(time.Since(startTime).Milliseconds())
+			firstTokenMs = &elapsed
+		}
+
+		// Handle content
+		if delta.Content != nil {
+			if !inContentBlock {
+				// Start a new text content block
+				fmt.Fprintf(c.Writer, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+					contentBlockIndex)
+				c.Writer.Flush()
+				inContentBlock = true
+			}
+			// Send text delta
+			escaped := escapeJSONString(*delta.Content)
+			fmt.Fprintf(c.Writer, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n",
+				contentBlockIndex, escaped)
+			c.Writer.Flush()
+		}
+
+		// Handle tool calls
+		for _, tc := range delta.ToolCalls {
+			if !inContentBlock {
+				// Start a new tool_use content block
+				fmt.Fprintf(c.Writer, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"%s\",\"name\":\"%s\",\"input\":{}}}\n\n",
+					contentBlockIndex, tc.ID, tc.Function.Name)
+				c.Writer.Flush()
+				inContentBlock = true
+			}
+			// Send tool use delta
+			if tc.Function.Arguments != "" {
+				escaped := escapeJSONString(tc.Function.Arguments)
+				fmt.Fprintf(c.Writer, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"%s\"}}\n\n",
+					contentBlockIndex, escaped)
+				c.Writer.Flush()
+			}
+		}
+
+		// Handle finish reason
+		if choice.FinishReason != nil {
+			stopReason = mapChatFinishReasonToAnthropic(*choice.FinishReason)
+			if inContentBlock {
+				fmt.Fprintf(c.Writer, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n",
+					contentBlockIndex)
+				c.Writer.Flush()
+				contentBlockIndex++
+				inContentBlock = false
+			}
+		}
+
+		if !clientDisconnected {
+			c.Writer.Flush()
+		}
+	}
+
+	// Close any open content block
+	if inContentBlock {
+		fmt.Fprintf(c.Writer, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n",
+			contentBlockIndex)
+		c.Writer.Flush()
+	}
+
+	// Send message_delta with stop_reason and usage
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
+	fmt.Fprintf(c.Writer, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"%s\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}}\n\n",
+		stopReason, usage.InputTokens, usage.OutputTokens)
+	c.Writer.Flush()
+
+	// Send message_stop
+	fmt.Fprintf(c.Writer, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	c.Writer.Flush()
+
+	result := &OpenAIForwardResult{
+		Usage: OpenAIUsage{
+			InputTokens:  usage.InputTokens,
+			OutputTokens: usage.OutputTokens,
+		},
+		FirstTokenMs: firstTokenMs,
+		Model:        originalModel,
+	}
+	return result, nil
+}
+
+// handleAnthropicBufferedFromChatCompletions buffers the streaming Chat
+// Completions response and returns it as a non-streaming Anthropic Messages
+// response.
+func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
+	resp *http.Response,
+	c *gin.Context,
+	originalModel, billingModel, upstreamModel string,
+	startTime time.Time,
+) (*OpenAIForwardResult, error) {
+	scanner := bufio.NewScanner(resp.Body)
+	maxLineSize := defaultMaxLineSize
+	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = s.cfg.Gateway.MaxLineSize
+	}
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+
+	var contentText string
+	var toolCalls []apicompat.ChatToolCall
+	var usage OpenAIUsage
+	var firstTokenMs *int
+	stopReason := "end_turn"
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		payload, ok := extractOpenAISSEDataLine(line)
+		if !ok {
+			continue
+		}
+
+		trimmedPayload := strings.TrimSpace(payload)
+		if trimmedPayload == "[DONE]" {
+			break
+		}
+
+		var chunk apicompat.ChatCompletionsChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+
+		if chunk.Usage != nil {
+			usage.InputTokens = chunk.Usage.PromptTokens
+			usage.OutputTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.PromptTokensDetails != nil {
+				usage.CacheReadInputTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+			}
+		}
+
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		choice := chunk.Choices[0]
+		delta := choice.Delta
+
+		if firstTokenMs == nil && (delta.Content != nil || len(delta.ToolCalls) > 0) {
+			elapsed := int(time.Since(startTime).Milliseconds())
+			firstTokenMs = &elapsed
+		}
+
+		if delta.Content != nil {
+			contentText += *delta.Content
+		}
+
+		for _, tc := range delta.ToolCalls {
+			// Merge tool call deltas
+			found := false
+			for i := range toolCalls {
+				if toolCalls[i].ID == tc.ID {
+					toolCalls[i].Function.Arguments += tc.Function.Arguments
+					found = true
+					break
+				}
+			}
+			if !found && tc.ID != "" {
+				toolCalls = append(toolCalls, tc)
+			}
+		}
+
+		if choice.FinishReason != nil {
+			stopReason = mapChatFinishReasonToAnthropic(*choice.FinishReason)
+		}
+	}
+
+	// Build Anthropic response
+	var contentBlocks []apicompat.AnthropicContentBlock
+	if contentText != "" {
+		contentBlocks = append(contentBlocks, apicompat.AnthropicContentBlock{
+			Type: "text",
+			Text: contentText,
+		})
+	}
+	for _, tc := range toolCalls {
+		inputJSON := tc.Function.Arguments
+		if inputJSON == "" {
+			inputJSON = "{}"
+		}
+		contentBlocks = append(contentBlocks, apicompat.AnthropicContentBlock{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: json.RawMessage(inputJSON),
+		})
+	}
+
+	anthropicResp := apicompat.AnthropicResponse{
+		ID:         "msg_" + generateAnthropicMessageID(),
+		Type:       "message",
+		Role:       "assistant",
+		Content:    contentBlocks,
+		Model:      originalModel,
+		StopReason: stopReason,
+		Usage: apicompat.AnthropicUsage{
+			InputTokens:  usage.InputTokens,
+			OutputTokens: usage.OutputTokens,
+		},
+	}
+
+	c.JSON(http.StatusOK, anthropicResp)
+
+	result := &OpenAIForwardResult{
+		Usage:    usage,
+		FirstTokenMs: firstTokenMs,
+		Model:    originalModel,
+	}
+	return result, nil
+}
+
+func mapChatFinishReasonToAnthropic(reason string) string {
+	switch reason {
+	case "tool_calls":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	case "stop":
+		return "end_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+func escapeJSONString(s string) string {
+	b, _ := json.Marshal(s)
+	// Remove the surrounding quotes
+	return string(b[1 : len(b)-1])
+}
+
+func generateAnthropicMessageID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

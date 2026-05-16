@@ -501,6 +501,59 @@ type ChatDelta struct {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI legacy Completions API types
+// ---------------------------------------------------------------------------
+
+type CompletionsRequest struct {
+	Model       string          `json:"model"`
+	Prompt      string          `json:"prompt"`
+	MaxTokens   *int            `json:"max_tokens,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	TopP        *float64        `json:"top_p,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
+	Stop        json.RawMessage `json:"stop,omitempty"`
+}
+
+type CompletionsResponse struct {
+	ID      string              `json:"id"`
+	Object  string              `json:"object"`
+	Created int64               `json:"created"`
+	Model   string              `json:"model"`
+	Choices []CompletionsChoice `json:"choices"`
+	Usage   *CompletionsUsage   `json:"usage,omitempty"`
+}
+
+type CompletionsChoice struct {
+	Text         string          `json:"text"`
+	Index        int             `json:"index"`
+	Logprobs     json.RawMessage `json:"logprobs,omitempty"`
+	FinishReason string          `json:"finish_reason"`
+}
+
+type CompletionsUsage struct {
+	PromptTokens        int               `json:"prompt_tokens"`
+	CompletionTokens    int               `json:"completion_tokens"`
+	TotalTokens         int               `json:"total_tokens"`
+	PromptTokensDetails *ChatTokenDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type CompletionsChunk struct {
+	ID      string                   `json:"id"`
+	Object  string                   `json:"object"`
+	Created int64                    `json:"created"`
+	Model   string                   `json:"model"`
+	Choices []CompletionsChunkChoice `json:"choices"`
+	Usage   *CompletionsUsage        `json:"usage,omitempty"`
+}
+
+type CompletionsChunkChoice struct {
+	Text         string          `json:"text"`
+	Index        int             `json:"index"`
+	Logprobs     json.RawMessage `json:"logprobs,omitempty"`
+	FinishReason *string         `json:"finish_reason"`
+}
+
+// ---------------------------------------------------------------------------
 // Shared constants
 // ---------------------------------------------------------------------------
 
