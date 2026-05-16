@@ -276,12 +276,10 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 	for _, b := range blocks {
 		switch b.Type {
 		case "thinking":
-			if b.Thinking != "" {
-				contentParts = append(contentParts, ResponsesContentPart{
-					Type: "thinking",
-					Text: b.Thinking,
-				})
-			}
+			contentParts = append(contentParts, ResponsesContentPart{
+				Type: "thinking",
+				Text: b.Thinking,
+			})
 		case "text":
 			if b.Text != "" {
 				contentParts = append(contentParts, ResponsesContentPart{

@@ -391,7 +391,7 @@ type ChatStreamOptions struct {
 type ChatMessage struct {
 	Role             string          `json:"role"` // "system" | "user" | "assistant" | "tool" | "function"
 	Content          json.RawMessage `json:"content,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	Name             string          `json:"name,omitempty"`
 	ToolCalls        []ChatToolCall  `json:"tool_calls,omitempty"`
 	ToolCallID       string          `json:"tool_call_id,omitempty"`

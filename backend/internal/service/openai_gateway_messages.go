@@ -1333,6 +1333,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 
 	var contentText string
 	var reasoningContent string
+	var hasReasoning bool
 	var toolCalls []apicompat.ChatToolCall
 	var usage OpenAIUsage
 	var firstTokenMs *int
@@ -1376,6 +1377,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 		}
 
 		if delta.ReasoningContent != nil {
+			hasReasoning = true
 			reasoningContent += *delta.ReasoningContent
 		}
 
@@ -1405,7 +1407,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 
 	// Build Anthropic response
 	var contentBlocks []apicompat.AnthropicContentBlock
-	if reasoningContent != "" {
+	if hasReasoning {
 		contentBlocks = append(contentBlocks, apicompat.AnthropicContentBlock{
 			Type:     "thinking",
 			Thinking: reasoningContent,

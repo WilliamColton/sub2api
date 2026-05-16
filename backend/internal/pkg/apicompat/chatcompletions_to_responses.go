@@ -155,10 +155,10 @@ func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 
 	// Build content parts: thinking (from ReasoningContent) + text.
 	var contentParts []ResponsesContentPart
-	if m.ReasoningContent != "" {
+	if m.ReasoningContent != nil {
 		contentParts = append(contentParts, ResponsesContentPart{
 			Type: "thinking",
-			Text: m.ReasoningContent,
+			Text: *m.ReasoningContent,
 		})
 	}
 

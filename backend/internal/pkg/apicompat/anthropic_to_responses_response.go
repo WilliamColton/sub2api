@@ -33,16 +33,14 @@ func AnthropicToResponsesResponse(resp *AnthropicResponse) *ResponsesResponse {
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "thinking":
-			if block.Thinking != "" {
-				outputs = append(outputs, ResponsesOutput{
-					Type: "reasoning",
-					ID:   generateItemID(),
-					Summary: []ResponsesSummary{{
-						Type: "summary_text",
-						Text: block.Thinking,
-					}},
-				})
-			}
+			outputs = append(outputs, ResponsesOutput{
+				Type: "reasoning",
+				ID:   generateItemID(),
+				Summary: []ResponsesSummary{{
+					Type: "summary_text",
+					Text: block.Thinking,
+				}},
+			})
 		case "text":
 			if block.Text != "" {
 				msgParts = append(msgParts, ResponsesContentPart{

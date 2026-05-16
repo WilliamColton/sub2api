@@ -470,7 +470,8 @@ func TestResponsesToChatCompletions_Reasoning(t *testing.T) {
 	var content string
 	require.NoError(t, json.Unmarshal(chat.Choices[0].Message.Content, &content))
 	assert.Equal(t, "The answer is 42.", content)
-	assert.Equal(t, "I thought about it.", chat.Choices[0].Message.ReasoningContent)
+	require.NotNil(t, chat.Choices[0].Message.ReasoningContent)
+	assert.Equal(t, "I thought about it.", *chat.Choices[0].Message.ReasoningContent)
 }
 
 func TestChatCompletionsToResponses_ToolArrayContent(t *testing.T) {
@@ -1291,7 +1292,8 @@ func TestResponsesRequestToChatCompletions_MergesAssistantContentAndToolCalls(t 
 	require.NoError(t, err)
 	require.Len(t, cc.Messages, 1)
 	assert.Equal(t, "assistant", cc.Messages[0].Role)
-	assert.Equal(t, "I should call a tool.", cc.Messages[0].ReasoningContent)
+	require.NotNil(t, cc.Messages[0].ReasoningContent)
+	assert.Equal(t, "I should call a tool.", *cc.Messages[0].ReasoningContent)
 	require.Len(t, cc.Messages[0].ToolCalls, 1)
 	assert.Equal(t, "call_1", cc.Messages[0].ToolCalls[0].ID)
 	assert.Equal(t, "lookup", cc.Messages[0].ToolCalls[0].Function.Name)

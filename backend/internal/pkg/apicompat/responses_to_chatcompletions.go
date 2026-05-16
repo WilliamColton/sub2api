@@ -124,7 +124,7 @@ func convertResponsesInputToChatMessages(input json.RawMessage, instructions str
 				Role:    role,
 				Content: content,
 			}
-			if reasoning != "" {
+			if reasoning != nil {
 				msg.ReasoningContent = reasoning
 			}
 			messages = append(messages, msg)
@@ -135,24 +135,33 @@ func convertResponsesInputToChatMessages(input json.RawMessage, instructions str
 }
 
 // extractThinkingFromResponsesContent extracts thinking/reasoning content from
-// Responses content parts. Returns concatenated thinking text, or empty string.
-func extractThinkingFromResponsesContent(content json.RawMessage) string {
+// Responses content parts. Returns nil if no thinking parts are present; a
+// pointer to the concatenated thinking text otherwise (which may be an empty
+// string when thinking parts exist but carry no text — DeepSeek can emit empty
+// reasoning_content that must be preserved across round-trips).
+func extractThinkingFromResponsesContent(content json.RawMessage) *string {
 	if content == nil {
-		return ""
+		return nil
 	}
 
 	var parts []ResponsesContentPart
 	if err := json.Unmarshal(content, &parts); err != nil {
-		return ""
+		return nil
 	}
 
 	var thinking strings.Builder
+	hasThinking := false
 	for _, part := range parts {
-		if part.Type == "thinking" && part.Text != "" {
+		if part.Type == "thinking" {
+			hasThinking = true
 			thinking.WriteString(part.Text)
 		}
 	}
-	return thinking.String()
+	if !hasThinking {
+		return nil
+	}
+	result := thinking.String()
+	return &result
 }
 
 // convertResponsesContentToChatContent converts Responses API content format
@@ -258,6 +267,7 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 
 	var contentText string
 	var reasoningText string
+	var hasReasoning bool
 	var toolCalls []ChatToolCall
 
 	for _, item := range resp.Output {
@@ -279,7 +289,8 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 			})
 		case "reasoning":
 			for _, s := range item.Summary {
-				if s.Type == "summary_text" && s.Text != "" {
+				if s.Type == "summary_text" {
+					hasReasoning = true
 					reasoningText += s.Text
 				}
 			}
@@ -296,8 +307,8 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		raw, _ := json.Marshal(contentText)
 		msg.Content = raw
 	}
-	if reasoningText != "" {
-		msg.ReasoningContent = reasoningText
+	if hasReasoning {
+		msg.ReasoningContent = &reasoningText
 	}
 
 	finishReason := responsesStatusToChatFinishReason(resp.Status, resp.IncompleteDetails, toolCalls)
@@ -620,6 +631,7 @@ type bufferedFuncCall struct {
 type BufferedResponseAccumulator struct {
 	text                 strings.Builder
 	reasoning            strings.Builder
+	hasReasoning         bool
 	funcCalls            []bufferedFuncCall
 	outputIndexToFuncIdx map[int]int
 }
@@ -656,6 +668,7 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 			}
 		}
 	case "response.reasoning_summary_text.delta":
+		a.hasReasoning = true
 		if event.Delta != "" {
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
@@ -664,7 +677,7 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 
 // HasContent reports whether any content has been accumulated.
 func (a *BufferedResponseAccumulator) HasContent() bool {
-	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.reasoning.Len() > 0
+	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.hasReasoning
 }
 
 // BuildOutput constructs a []ResponsesOutput from the accumulated delta
@@ -673,7 +686,7 @@ func (a *BufferedResponseAccumulator) HasContent() bool {
 func (a *BufferedResponseAccumulator) BuildOutput() []ResponsesOutput {
 	var out []ResponsesOutput
 
-	if a.reasoning.Len() > 0 {
+	if a.hasReasoning {
 		out = append(out, ResponsesOutput{
 			Type: "reasoning",
 			Summary: []ResponsesSummary{{
