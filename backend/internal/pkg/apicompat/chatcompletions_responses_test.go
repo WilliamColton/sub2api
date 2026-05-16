@@ -1144,3 +1144,178 @@ func TestBufferedResponseAccumulator_IgnoresNonFunctionCallItems(t *testing.T) {
 
 	assert.False(t, acc.HasContent())
 }
+
+// ---------------------------------------------------------------------------
+// Bug fix regression tests
+// ---------------------------------------------------------------------------
+
+func TestChatCompletionsToResponses_ToolParameterNormalization(t *testing.T) {
+	t.Run("object without properties gets properties added", func(t *testing.T) {
+		req := &ChatCompletionsRequest{
+			Model:    "gpt-4o",
+			Messages: []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+			Tools: []ChatTool{{
+				Type: "function",
+				Function: &ChatFunction{
+					Name:       "test",
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				},
+			}},
+		}
+		resp, err := ChatCompletionsToResponses(req)
+		require.NoError(t, err)
+		require.Len(t, resp.Tools, 1)
+		var m map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(resp.Tools[0].Parameters, &m))
+		assert.Contains(t, m, "properties", "object schema must have properties")
+	})
+
+	t.Run("object with properties passes through", func(t *testing.T) {
+		schema := `{"type":"object","properties":{"city":{"type":"string"}}}`
+		req := &ChatCompletionsRequest{
+			Model:    "gpt-4o",
+			Messages: []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+			Tools: []ChatTool{{
+				Type: "function",
+				Function: &ChatFunction{
+					Name:       "test",
+					Parameters: json.RawMessage(schema),
+				},
+			}},
+		}
+		resp, err := ChatCompletionsToResponses(req)
+		require.NoError(t, err)
+		assert.Equal(t, json.RawMessage(schema), resp.Tools[0].Parameters)
+	})
+
+	t.Run("nil parameters gets default object schema", func(t *testing.T) {
+		req := &ChatCompletionsRequest{
+			Model:    "gpt-4o",
+			Messages: []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+			Tools: []ChatTool{{
+				Type:       "function",
+				Function:   &ChatFunction{Name: "test"},
+			}},
+		}
+		resp, err := ChatCompletionsToResponses(req)
+		require.NoError(t, err)
+		var m map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(resp.Tools[0].Parameters, &m))
+		assert.Equal(t, `"object"`, string(m["type"]))
+		assert.Contains(t, m, "properties")
+	})
+
+	t.Run("legacy function parameters also normalized", func(t *testing.T) {
+		req := &ChatCompletionsRequest{
+			Model:    "gpt-4o",
+			Messages: []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+			Functions: []ChatFunction{{
+				Name:       "legacy_fn",
+				Parameters: json.RawMessage(`{"type":"object"}`),
+			}},
+		}
+		resp, err := ChatCompletionsToResponses(req)
+		require.NoError(t, err)
+		require.Len(t, resp.Tools, 1)
+		var m map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(resp.Tools[0].Parameters, &m))
+		assert.Contains(t, m, "properties")
+	})
+}
+
+func TestChatCompletionsToResponses_ToolChoiceConversion(t *testing.T) {
+	t.Run("nested function format is flattened", func(t *testing.T) {
+		req := &ChatCompletionsRequest{
+			Model:      "gpt-4o",
+			Messages:   []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+			ToolChoice: json.RawMessage(`{"type":"function","function":{"name":"my_func"}}`),
+		}
+		resp, err := ChatCompletionsToResponses(req)
+		require.NoError(t, err)
+		var tc map[string]string
+		require.NoError(t, json.Unmarshal(resp.ToolChoice, &tc))
+		assert.Equal(t, "function", tc["type"])
+		assert.Equal(t, "my_func", tc["name"])
+		assert.NotContains(t, tc, "function")
+	})
+
+	t.Run("flat function format passes through", func(t *testing.T) {
+		req := &ChatCompletionsRequest{
+			Model:      "gpt-4o",
+			Messages:   []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+			ToolChoice: json.RawMessage(`{"type":"function","name":"my_func"}`),
+		}
+		resp, err := ChatCompletionsToResponses(req)
+		require.NoError(t, err)
+		var tc map[string]string
+		require.NoError(t, json.Unmarshal(resp.ToolChoice, &tc))
+		assert.Equal(t, "function", tc["type"])
+		assert.Equal(t, "my_func", tc["name"])
+	})
+
+	t.Run("string values pass through", func(t *testing.T) {
+		for _, val := range []string{`"auto"`, `"none"`, `"required"`} {
+			req := &ChatCompletionsRequest{
+				Model:      "gpt-4o",
+				Messages:   []ChatMessage{{Role: "user", Content: json.RawMessage(`"Hi"`)}},
+				ToolChoice: json.RawMessage(val),
+			}
+			resp, err := ChatCompletionsToResponses(req)
+			require.NoError(t, err)
+			assert.Equal(t, json.RawMessage(val), resp.ToolChoice)
+		}
+	})
+}
+
+func TestResponsesRequestToChatCompletions_ParallelToolCalls(t *testing.T) {
+	trueVal := true
+	req := &ResponsesRequest{
+		Model:            "gpt-4o",
+		Input:            json.RawMessage(`[{"role":"user","content":"Hi"}]`),
+		ParallelToolCalls: &trueVal,
+	}
+	cc, err := ResponsesRequestToChatCompletions(req)
+	require.NoError(t, err)
+	require.NotNil(t, cc.ParallelToolCalls)
+	assert.True(t, *cc.ParallelToolCalls)
+}
+
+func TestResponsesRequestToChatCompletions_MergesAssistantContentAndToolCalls(t *testing.T) {
+	input := json.RawMessage(`[
+		{"type":"message","role":"assistant","content":[{"type":"thinking","text":"I should call a tool."},{"type":"output_text","text":"Checking."}]},
+		{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":\"x\"}"}
+	]`)
+	req := &ResponsesRequest{Model: "deepseek-v4-pro", Input: input}
+
+	cc, err := ResponsesRequestToChatCompletions(req)
+	require.NoError(t, err)
+	require.Len(t, cc.Messages, 1)
+	assert.Equal(t, "assistant", cc.Messages[0].Role)
+	assert.Equal(t, "I should call a tool.", cc.Messages[0].ReasoningContent)
+	require.Len(t, cc.Messages[0].ToolCalls, 1)
+	assert.Equal(t, "call_1", cc.Messages[0].ToolCalls[0].ID)
+	assert.Equal(t, "lookup", cc.Messages[0].ToolCalls[0].Function.Name)
+}
+
+func TestResponsesRequestToChatCompletions_NewlineInContent(t *testing.T) {
+	// Verify that tool result content with newlines produces valid JSON.
+	// Regression test for: json.RawMessage(`"` + s + `"`) which broke on newlines.
+	input := json.RawMessage(`[{"type":"function_call","call_id":"c1","name":"bash","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"line1\nline2\nline3"}]`)
+	req := &ResponsesRequest{
+		Model: "gpt-4o",
+		Input: input,
+	}
+	cc, err := ResponsesRequestToChatCompletions(req)
+	require.NoError(t, err)
+
+	// The entire request must marshal without error.
+	_, err = json.Marshal(cc)
+	require.NoError(t, err, "marshal must succeed when content contains newlines")
+
+	// Verify the tool message content is properly escaped.
+	require.Len(t, cc.Messages, 2)
+	assert.Equal(t, "tool", cc.Messages[1].Role)
+	var content string
+	require.NoError(t, json.Unmarshal(cc.Messages[1].Content, &content))
+	assert.Equal(t, "line1\nline2\nline3", content)
+}

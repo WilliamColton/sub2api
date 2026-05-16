@@ -105,7 +105,7 @@ func TestForwardAsRawChatCompletions_ForcesStreamUsageUpstreamAndPassesUsageDown
 	}
 	account := rawChatCompletionsTestAccount()
 
-	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 9, result.Usage.InputTokens)
@@ -148,7 +148,7 @@ func TestForwardAsRawChatCompletions_ClientDisconnectDrainsUsage(t *testing.T) {
 	}
 	account := rawChatCompletionsTestAccount()
 
-	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "")
+	result, err := svc.forwardAsRawChatCompletions(context.Background(), c, account, body, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, 17, result.Usage.InputTokens)
@@ -186,7 +186,7 @@ func TestForwardAsRawChatCompletions_UpstreamRequestIgnoresClientCancel(t *testi
 	}
 	account := rawChatCompletionsTestAccount()
 
-	result, err := svc.forwardAsRawChatCompletions(reqCtx, c, account, body, "")
+	result, err := svc.forwardAsRawChatCompletions(reqCtx, c, account, body, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.NotNil(t, upstream.lastReq)

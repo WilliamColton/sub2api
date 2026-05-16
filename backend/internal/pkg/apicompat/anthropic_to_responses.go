@@ -250,7 +250,8 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 // anthropicAssistantToResponses handles an Anthropic assistant message.
 // Text content → assistant message with output_text parts.
 // tool_use blocks → function_call items.
-// thinking blocks → ignored (OpenAI doesn't accept them as input).
+// thinking blocks → preserved as content parts with type "thinking" so that
+// providers requiring reasoning_content (e.g. DeepSeek) can receive it back.
 func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, error) {
 	// Try plain string.
 	var s string
@@ -270,11 +271,28 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 
 	var items []ResponsesInputItem
 
-	// Text content → assistant message with output_text content parts.
-	text := extractAnthropicTextFromBlocks(blocks)
-	if text != "" {
-		parts := []ResponsesContentPart{{Type: "output_text", Text: text}}
-		partsJSON, err := json.Marshal(parts)
+	// Build content parts: thinking blocks + text blocks together.
+	var contentParts []ResponsesContentPart
+	for _, b := range blocks {
+		switch b.Type {
+		case "thinking":
+			if b.Thinking != "" {
+				contentParts = append(contentParts, ResponsesContentPart{
+					Type: "thinking",
+					Text: b.Thinking,
+				})
+			}
+		case "text":
+			if b.Text != "" {
+				contentParts = append(contentParts, ResponsesContentPart{
+					Type: "output_text",
+					Text: b.Text,
+				})
+			}
+		}
+	}
+	if len(contentParts) > 0 {
+		partsJSON, err := json.Marshal(contentParts)
 		if err != nil {
 			return nil, err
 		}

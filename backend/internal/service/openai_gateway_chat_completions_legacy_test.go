@@ -65,7 +65,7 @@ func TestForwardAsLegacyCompletionsFromChat_Buffered(t *testing.T) {
 	account := legacyCompletionsTestAccount()
 	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardAsLegacyCompletionsFromChat(context.Background(), c, account, body, "")
+	result, err := svc.forwardAsLegacyCompletionsFromChat(context.Background(), c, account, body, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "rid_legacy", result.RequestID)
@@ -107,7 +107,7 @@ func TestForwardAsLegacyCompletionsFromChat_Stream(t *testing.T) {
 	account := legacyCompletionsTestAccount()
 	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
 
-	result, err := svc.forwardAsLegacyCompletionsFromChat(context.Background(), c, account, body, "")
+	result, err := svc.forwardAsLegacyCompletionsFromChat(context.Background(), c, account, body, "", "")
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.True(t, result.Stream)

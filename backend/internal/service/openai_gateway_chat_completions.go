@@ -64,9 +64,9 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	if account.Type == AccountTypeAPIKey {
 		switch openai_compat.ResolveChatCompletionsUpstreamAPI(account.Extra) {
 		case openai_compat.OpenAIUpstreamAPILegacyCompletions:
-			return s.forwardAsLegacyCompletionsFromChat(ctx, c, account, body, defaultMappedModel)
+			return s.forwardAsLegacyCompletionsFromChat(ctx, c, account, body, defaultMappedModel, promptCacheKey)
 		case openai_compat.OpenAIUpstreamAPIChatCompletions:
-			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel, promptCacheKey)
 		}
 	}
 

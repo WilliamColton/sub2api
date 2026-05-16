@@ -1141,6 +1141,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingFromChatCompletions(
 	clientDisconnected := false
 	contentBlockIndex := 0
 	inContentBlock := false
+	inThinkingBlock := false
+	currentToolCallID := "" // tracks the tool_use block's call_id for multi-tool transitions
 	stopReason := ""
 
 	for scanner.Scan() {
@@ -1181,21 +1183,51 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingFromChatCompletions(
 		choice := chunk.Choices[0]
 		delta := choice.Delta
 
-		if firstTokenMs == nil && (delta.Content != nil || len(delta.ToolCalls) > 0) {
+		if firstTokenMs == nil && (delta.Content != nil || len(delta.ToolCalls) > 0 || delta.ReasoningContent != nil) {
 			elapsed := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &elapsed
 		}
 
+		// Handle reasoning_content (DeepSeek thinking mode)
+		if delta.ReasoningContent != nil {
+			if inContentBlock && !inThinkingBlock {
+				fmt.Fprintf(c.Writer, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n",
+					contentBlockIndex)
+				c.Writer.Flush()
+				contentBlockIndex++
+				inContentBlock = false
+				currentToolCallID = ""
+			}
+			if !inThinkingBlock {
+				fmt.Fprintf(c.Writer, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+					contentBlockIndex)
+				c.Writer.Flush()
+				inThinkingBlock = true
+				inContentBlock = true
+			}
+			escaped := escapeJSONString(*delta.ReasoningContent)
+			fmt.Fprintf(c.Writer, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"%s\"}}\n\n",
+				contentBlockIndex, escaped)
+			c.Writer.Flush()
+		}
+
 		// Handle content
 		if delta.Content != nil {
+			if inContentBlock && (inThinkingBlock || currentToolCallID != "") {
+				fmt.Fprintf(c.Writer, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n",
+					contentBlockIndex)
+				c.Writer.Flush()
+				contentBlockIndex++
+				inThinkingBlock = false
+				inContentBlock = false
+				currentToolCallID = ""
+			}
 			if !inContentBlock {
-				// Start a new text content block
 				fmt.Fprintf(c.Writer, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
 					contentBlockIndex)
 				c.Writer.Flush()
 				inContentBlock = true
 			}
-			// Send text delta
 			escaped := escapeJSONString(*delta.Content)
 			fmt.Fprintf(c.Writer, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"text_delta\",\"text\":\"%s\"}}\n\n",
 				contentBlockIndex, escaped)
@@ -1204,15 +1236,29 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingFromChatCompletions(
 
 		// Handle tool calls
 		for _, tc := range delta.ToolCalls {
-			if !inContentBlock {
+			// Close any open block of a different type before starting tool_use.
+			// This handles: text→tool_use, thinking→tool_use, and tool_use→tool_use
+			// (multiple tool calls in the stream). Continuation chunks (tc.ID == "")
+			// append to the current tool_use block without closing it.
+			if inContentBlock && (inThinkingBlock || (tc.ID != "" && tc.ID != currentToolCallID)) {
+				fmt.Fprintf(c.Writer, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":%d}\n\n",
+					contentBlockIndex)
+				c.Writer.Flush()
+				contentBlockIndex++
+				inContentBlock = false
+				inThinkingBlock = false
+				currentToolCallID = ""
+			}
+			if !inContentBlock && tc.ID != "" {
 				// Start a new tool_use content block
 				fmt.Fprintf(c.Writer, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"%s\",\"name\":\"%s\",\"input\":{}}}\n\n",
 					contentBlockIndex, tc.ID, tc.Function.Name)
 				c.Writer.Flush()
 				inContentBlock = true
+				currentToolCallID = tc.ID
 			}
 			// Send tool use delta
-			if tc.Function.Arguments != "" {
+			if inContentBlock && tc.Function.Arguments != "" {
 				escaped := escapeJSONString(tc.Function.Arguments)
 				fmt.Fprintf(c.Writer, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"%s\"}}\n\n",
 					contentBlockIndex, escaped)
@@ -1229,6 +1275,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingFromChatCompletions(
 				c.Writer.Flush()
 				contentBlockIndex++
 				inContentBlock = false
+				inThinkingBlock = false
+				currentToolCallID = ""
 			}
 		}
 
@@ -1284,6 +1332,7 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 
 	var contentText string
+	var reasoningContent string
 	var toolCalls []apicompat.ChatToolCall
 	var usage OpenAIUsage
 	var firstTokenMs *int
@@ -1321,9 +1370,13 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 		choice := chunk.Choices[0]
 		delta := choice.Delta
 
-		if firstTokenMs == nil && (delta.Content != nil || len(delta.ToolCalls) > 0) {
+		if firstTokenMs == nil && (delta.Content != nil || len(delta.ToolCalls) > 0 || delta.ReasoningContent != nil) {
 			elapsed := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &elapsed
+		}
+
+		if delta.ReasoningContent != nil {
+			reasoningContent += *delta.ReasoningContent
 		}
 
 		if delta.Content != nil {
@@ -1352,6 +1405,12 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 
 	// Build Anthropic response
 	var contentBlocks []apicompat.AnthropicContentBlock
+	if reasoningContent != "" {
+		contentBlocks = append(contentBlocks, apicompat.AnthropicContentBlock{
+			Type:     "thinking",
+			Thinking: reasoningContent,
+		})
+	}
 	if contentText != "" {
 		contentBlocks = append(contentBlocks, apicompat.AnthropicContentBlock{
 			Type: "text",

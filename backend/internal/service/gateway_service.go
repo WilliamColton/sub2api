@@ -4219,10 +4219,10 @@ func enforceCacheControlLimit(body []byte) []byte {
 		remaining--
 	}
 
-	for _, path := range messagePaths {
-		if remaining <= 0 {
-			break
-		}
+	// 从后往前裁剪：靠后的消息每轮都变（最不稳定），优先移除；
+	// 靠前的消息（system prompt、首轮 user）在多轮间稳定，优先保留。
+	for i := len(messagePaths) - 1; i >= 0 && remaining > 0; i-- {
+		path := messagePaths[i]
 		if !gjson.GetBytes(out, path).Exists() {
 			continue
 		}

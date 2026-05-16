@@ -23,12 +23,13 @@ func ResponsesRequestToChatCompletions(req *ResponsesRequest) (*ChatCompletionsR
 	}
 
 	out := &ChatCompletionsRequest{
-		Model:       req.Model,
-		Messages:    messages,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stream:      req.Stream,
-		ServiceTier: req.ServiceTier,
+		Model:             req.Model,
+		Messages:          messages,
+		Temperature:       req.Temperature,
+		TopP:              req.TopP,
+		Stream:            req.Stream,
+		ServiceTier:       req.ServiceTier,
+		ParallelToolCalls: req.ParallelToolCalls,
 	}
 
 	if req.MaxOutputTokens != nil {
@@ -55,9 +56,10 @@ func convertResponsesInputToChatMessages(input json.RawMessage, instructions str
 
 	// Add instructions as system message
 	if instructions != "" {
+		content, _ := json.Marshal(instructions)
 		messages = append(messages, ChatMessage{
 			Role:    "system",
-			Content: json.RawMessage(`"` + instructions + `"`),
+			Content: content,
 		})
 	}
 
@@ -70,9 +72,10 @@ func convertResponsesInputToChatMessages(input json.RawMessage, instructions str
 			return nil, fmt.Errorf("unmarshal responses input: %w", err)
 		}
 		if s != "" {
+			content, _ := json.Marshal(s)
 			messages = append(messages, ChatMessage{
 				Role:    "user",
-				Content: json.RawMessage(`"` + s + `"`),
+				Content: content,
 			})
 		}
 		return messages, nil
@@ -81,21 +84,28 @@ func convertResponsesInputToChatMessages(input json.RawMessage, instructions str
 	for _, item := range items {
 		switch item.Type {
 		case "function_call":
+			toolCall := ChatToolCall{
+				ID:   item.CallID,
+				Type: "function",
+				Function: ChatFunctionCall{
+					Name:      item.Name,
+					Arguments: item.Arguments,
+				},
+			}
+			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+				last := &messages[len(messages)-1]
+				last.ToolCalls = append(last.ToolCalls, toolCall)
+				continue
+			}
 			messages = append(messages, ChatMessage{
 				Role:      "assistant",
-				ToolCalls: []ChatToolCall{{
-					ID:   item.CallID,
-					Type: "function",
-					Function: ChatFunctionCall{
-						Name:      item.Name,
-						Arguments: item.Arguments,
-					},
-				}},
+				ToolCalls: []ChatToolCall{toolCall},
 			})
 		case "function_call_output":
+			content, _ := json.Marshal(item.Output)
 			messages = append(messages, ChatMessage{
 				Role:       "tool",
-				Content:    json.RawMessage(`"` + item.Output + `"`),
+				Content:    content,
 				ToolCallID: item.CallID,
 			})
 		default:
@@ -109,20 +119,47 @@ func convertResponsesInputToChatMessages(input json.RawMessage, instructions str
 			}
 
 			content := convertResponsesContentToChatContent(item.Content)
-			messages = append(messages, ChatMessage{
+			reasoning := extractThinkingFromResponsesContent(item.Content)
+			msg := ChatMessage{
 				Role:    role,
 				Content: content,
-			})
+			}
+			if reasoning != "" {
+				msg.ReasoningContent = reasoning
+			}
+			messages = append(messages, msg)
 		}
 	}
 
 	return messages, nil
 }
 
+// extractThinkingFromResponsesContent extracts thinking/reasoning content from
+// Responses content parts. Returns concatenated thinking text, or empty string.
+func extractThinkingFromResponsesContent(content json.RawMessage) string {
+	if content == nil {
+		return ""
+	}
+
+	var parts []ResponsesContentPart
+	if err := json.Unmarshal(content, &parts); err != nil {
+		return ""
+	}
+
+	var thinking strings.Builder
+	for _, part := range parts {
+		if part.Type == "thinking" && part.Text != "" {
+			thinking.WriteString(part.Text)
+		}
+	}
+	return thinking.String()
+}
+
 // convertResponsesContentToChatContent converts Responses API content format
 // to Chat Completions content format. The key difference is:
 // - Responses uses "input_text", "output_text", "input_image"
 // - Chat Completions uses "text", "image_url"
+// Thinking parts are filtered out (handled separately via ReasoningContent).
 func convertResponsesContentToChatContent(content json.RawMessage) json.RawMessage {
 	if content == nil {
 		return json.RawMessage(`""`)
@@ -141,7 +178,7 @@ func convertResponsesContentToChatContent(content json.RawMessage) json.RawMessa
 		return content
 	}
 
-	// Convert to ChatContentPart format
+	// Convert to ChatContentPart format, filtering out thinking parts
 	var chatParts []ChatContentPart
 	for _, part := range parts {
 		switch part.Type {
@@ -157,6 +194,8 @@ func convertResponsesContentToChatContent(content json.RawMessage) json.RawMessa
 					URL: part.ImageURL,
 				},
 			})
+		case "thinking":
+			// Filtered out — extracted separately as ReasoningContent
 		default:
 			// Pass through unknown types as text
 			chatParts = append(chatParts, ChatContentPart{

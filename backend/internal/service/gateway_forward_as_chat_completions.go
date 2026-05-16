@@ -100,9 +100,17 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	if shouldMimicClaudeCode {
 		anthropicBody = s.applyClaudeCodeOAuthMimicryToBody(ctx, c, account, anthropicBody, anthropicReq.System, mappedModel)
+	} else {
+		// APIKey/ServiceAccount 账号：应用与 /v1/messages 路径一致的 cache_control 策略。
+		// CC 协议无 cache_control 概念，转换后的 Anthropic body 天然没有缓存断点——
+		// 此处补充注入确保上游 prompt 缓存可以命中。
+		anthropicBody = s.rewriteMessageCacheControlIfEnabled(ctx, anthropicBody)
+		if buildToolNameRewriteFromBody(anthropicBody) == nil {
+			anthropicBody = applyToolsLastCacheBreakpoint(anthropicBody)
+		}
 	}
 
-	// 7. Enforce cache_control block limit
+	// 7. Enforce cache_control block limit（所有注入后的最终安全兜底）
 	anthropicBody = enforceCacheControlLimit(anthropicBody)
 
 	// 8. Get access token

@@ -63,6 +63,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	account *Account,
 	body []byte,
 	defaultMappedModel string,
+	promptCacheKey string,
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 
@@ -155,6 +156,9 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	customUA := account.GetOpenAIUserAgent()
 	if customUA != "" {
 		upstreamReq.Header.Set("user-agent", customUA)
+	}
+	if promptCacheKey != "" {
+		upstreamReq.Header.Set("session_id", promptCacheKey)
 	}
 
 	// 6. Send request
