@@ -39,9 +39,14 @@ func setupDefaultAdminConcurrency() int {
 }
 
 // GetDataDir returns the data directory for storing config and lock files.
-// Priority: DATA_DIR env > /app/data (if exists and writable) > current directory
+// Priority: current directory > DATA_DIR env > /app/data (if exists and writable)
 func GetDataDir() string {
-	// Check DATA_DIR environment variable first
+	// Check current directory first — if config.yaml exists here, use it
+	if _, err := os.Stat(ConfigFileName); err == nil {
+		return "."
+	}
+
+	// Check DATA_DIR environment variable
 	if dir := os.Getenv("DATA_DIR"); dir != "" {
 		return dir
 	}
