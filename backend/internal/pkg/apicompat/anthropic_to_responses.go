@@ -276,10 +276,9 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 	for _, b := range blocks {
 		switch b.Type {
 		case "thinking":
-			contentParts = append(contentParts, ResponsesContentPart{
-				Type: "thinking",
-				Text: b.Thinking,
-			})
+			// Skip: "thinking" is not a valid Responses content part type.
+			// Reasoning from prior turns is handled via reasoning_content in
+			// the Chat Completions path and is not needed in Responses input.
 		case "text":
 			if b.Text != "" {
 				contentParts = append(contentParts, ResponsesContentPart{
