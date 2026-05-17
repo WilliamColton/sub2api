@@ -994,6 +994,10 @@ func (s *OpenAIGatewayService) forwardAsAnthropicViaChatCompletions(
 		return nil, fmt.Errorf("marshal chat completions request: %w", err)
 	}
 
+	// Ensure reasoning_content is present on all assistant messages when
+	// thinking mode is active (same guard as forwardAsRawChatCompletions).
+	chatBody = ensureReasoningContentInAssistantMessages(chatBody)
+
 	// 4. Get access token
 	token, _, err := s.GetAccessToken(ctx, account)
 	if err != nil {

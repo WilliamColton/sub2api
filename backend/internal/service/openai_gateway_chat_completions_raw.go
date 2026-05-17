@@ -454,24 +454,41 @@ func buildOpenAIChatCompletionsURL(base string) string {
 // "The reasoning_content in the thinking mode must be passed back to the API."
 // An empty string satisfies the requirement.
 //
-// Detection covers three formats:
+// Detection covers four cases:
 //   - thinking.type = "enabled" | "auto" (DeepSeek native)
 //   - reasoning_effort / reasoning.effort (OpenAI-compatible)
 //   - thinking object present at top level (DeepSeek alternate)
+//   - any assistant message already carries reasoning_content (model
+//     has thinking on by default, detected from prior-turn history)
 func ensureReasoningContentInAssistantMessages(body []byte) []byte {
-	// Determine whether thinking/reasoning mode is active.
 	thinkingType := strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String())
 	hasThinking := thinkingType == "enabled" || thinkingType == "auto"
 	hasReasoningEffort := strings.TrimSpace(gjson.GetBytes(body, "reasoning_effort").String()) != "" ||
 		strings.TrimSpace(gjson.GetBytes(body, "reasoning.effort").String()) != ""
 	hasThinkingObject := gjson.GetBytes(body, "thinking").Exists()
 
-	if !hasThinking && !hasReasoningEffort && !hasThinkingObject {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		if !hasThinking && !hasReasoningEffort && !hasThinkingObject {
+			return body
+		}
 		return body
 	}
 
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.Exists() || !messages.IsArray() {
+	// If no explicit thinking parameter is set, check whether any assistant
+	// message already has reasoning_content — that proves thinking mode was
+	// active in a previous turn and we must propagate the field.
+	hasReasoningInHistory := false
+	if !hasThinking && !hasReasoningEffort && !hasThinkingObject {
+		for _, msg := range messages.Array() {
+			if msg.Get("role").String() == "assistant" && msg.Get("reasoning_content").Exists() {
+				hasReasoningInHistory = true
+				break
+			}
+		}
+	}
+
+	if !hasThinking && !hasReasoningEffort && !hasThinkingObject && !hasReasoningInHistory {
 		return body
 	}
 
