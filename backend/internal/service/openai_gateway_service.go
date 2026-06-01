@@ -2376,30 +2376,41 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	//      否则 native /responses 入口透传 "fast" 给上游会被拒。chat-
 	//      completions 入口由 normalizeResponsesBodyServiceTier 完成同一
 	//      行为，这里手工实现等效逻辑。
-	if rawTier, ok := reqBody["service_tier"].(string); ok {
-		if normTier := normalizedOpenAIServiceTierValue(rawTier); normTier != "" {
-			action, errMsg := s.evaluateOpenAIFastPolicy(ctx, account, upstreamModel, normTier)
-			switch action {
-			case BetaPolicyActionBlock:
-				msg := errMsg
-				if msg == "" {
-					msg = fmt.Sprintf("openai service_tier=%s is not allowed for model %s", normTier, upstreamModel)
-				}
-				blocked := &OpenAIFastBlockedError{Message: msg}
-				writeOpenAIFastPolicyBlockedResponse(c, blocked)
-				return nil, blocked
-			case BetaPolicyActionFilter:
+	rawTier, _ := reqBody["service_tier"].(string)
+	normTier := ""
+	if rawTier != "" {
+		normTier = normalizedOpenAIServiceTierValue(rawTier)
+	}
+	action, errMsg := s.evaluateOpenAIFastPolicy(ctx, account, upstreamModel, normTier)
+	if normTier != "" || action == OpenAIFastPolicyActionForce {
+		switch action {
+		case OpenAIFastPolicyActionForce:
+			if rawTier != OpenAIFastTierPriority {
+				reqBody["service_tier"] = OpenAIFastTierPriority
+				bodyModified = true
+				markPatchSet("service_tier", OpenAIFastTierPriority)
+			}
+		case BetaPolicyActionBlock:
+			msg := errMsg
+			if msg == "" {
+				msg = fmt.Sprintf("openai service_tier=%s is not allowed for model %s", normTier, upstreamModel)
+			}
+			blocked := &OpenAIFastBlockedError{Message: msg}
+			writeOpenAIFastPolicyBlockedResponse(c, blocked)
+			return nil, blocked
+		case BetaPolicyActionFilter:
+			if _, exists := reqBody["service_tier"]; exists {
 				delete(reqBody, "service_tier")
 				bodyModified = true
 				disablePatch()
-			default:
-				// pass：若客户端传的是别名 "fast"，归一化为 "priority"
-				// 后写回 body，确保上游收到的是其能识别的规范值。
-				if normTier != rawTier {
-					reqBody["service_tier"] = normTier
-					bodyModified = true
-					markPatchSet("service_tier", normTier)
-				}
+			}
+		default:
+			// pass：若客户端传的是别名 "fast"，归一化为 "priority"
+			// 后写回 body，确保上游收到的是其能识别的规范值。
+			if normTier != rawTier {
+				reqBody["service_tier"] = normTier
+				bodyModified = true
+				markPatchSet("service_tier", normTier)
 			}
 		}
 	}
@@ -5954,9 +5965,6 @@ func (s *OpenAIGatewayService) evaluateOpenAIFastPolicy(ctx context.Context, acc
 		return BetaPolicyActionPass, ""
 	}
 	tier := strings.ToLower(strings.TrimSpace(serviceTier))
-	if tier == "" {
-		return BetaPolicyActionPass, ""
-	}
 	settings := openAIFastPolicySettingsFromContext(ctx)
 	if settings == nil {
 		fetched, err := s.settingService.GetOpenAIFastPolicySettings(ctx)
@@ -5983,9 +5991,6 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, ac
 			continue
 		}
 		ruleTier := strings.ToLower(strings.TrimSpace(rule.ServiceTier))
-		if ruleTier != "" && ruleTier != OpenAIFastTierAny && ruleTier != tier {
-			continue
-		}
 		eff := BetaPolicyRule{
 			Action:               rule.Action,
 			ErrorMessage:         rule.ErrorMessage,
@@ -5993,7 +5998,20 @@ func evaluateOpenAIFastPolicyWithSettings(settings *OpenAIFastPolicySettings, ac
 			FallbackAction:       rule.FallbackAction,
 			FallbackErrorMessage: rule.FallbackErrorMessage,
 		}
-		return resolveRuleAction(eff, model)
+		effectiveAction, effectiveErrMsg := resolveRuleAction(eff, model)
+		if tier == "" {
+			if effectiveAction != OpenAIFastPolicyActionForce {
+				continue
+			}
+			if ruleTier != "" && ruleTier != OpenAIFastTierAny && ruleTier != OpenAIFastTierPriority {
+				continue
+			}
+			return effectiveAction, effectiveErrMsg
+		}
+		if ruleTier != "" && ruleTier != OpenAIFastTierAny && ruleTier != tier {
+			continue
+		}
+		return effectiveAction, effectiveErrMsg
 	}
 	return BetaPolicyActionPass, ""
 }
@@ -6032,7 +6050,8 @@ func openAIFastPolicySettingsFromContext(ctx context.Context) *OpenAIFastPolicyS
 // body. When action=filter it removes the service_tier field; when
 // action=block it returns (body, *OpenAIFastBlockedError). On pass it
 // normalizes the service_tier value (e.g. client alias "fast" → "priority"),
-// rewriting the body so the upstream receives a slug it recognizes.
+// rewriting the body so the upstream receives a slug it recognizes. On force it
+// writes service_tier="priority", including when the client omitted the field.
 //
 // Rationale for normalize-on-pass: chat-completions / messages 入口在调用本
 // 函数之前已经通过 normalizeResponsesBodyServiceTier 把 service_tier 归一化
@@ -6043,16 +6062,32 @@ func (s *OpenAIGatewayService) applyOpenAIFastPolicyToBody(ctx context.Context, 
 	if len(body) == 0 {
 		return body, nil
 	}
-	rawTier := gjson.GetBytes(body, "service_tier").String()
-	if rawTier == "" {
-		return body, nil
+	tierResult := gjson.GetBytes(body, "service_tier")
+	rawTier := tierResult.String()
+	normTier := ""
+	if rawTier != "" {
+		normTier = normalizedOpenAIServiceTierValue(rawTier)
 	}
-	normTier := normalizedOpenAIServiceTierValue(rawTier)
-	if normTier == "" {
-		return body, nil
+	if normTier == "" && rawTier != "" {
+		action, _ := s.evaluateOpenAIFastPolicy(ctx, account, model, "")
+		if action != OpenAIFastPolicyActionForce {
+			return body, nil
+		}
 	}
 	action, errMsg := s.evaluateOpenAIFastPolicy(ctx, account, model, normTier)
+	if normTier == "" && action != OpenAIFastPolicyActionForce {
+		return body, nil
+	}
 	switch action {
+	case OpenAIFastPolicyActionForce:
+		if rawTier == OpenAIFastTierPriority {
+			return body, nil
+		}
+		updated, err := sjson.SetBytes(body, "service_tier", OpenAIFastTierPriority)
+		if err != nil {
+			return body, fmt.Errorf("force service_tier on body: %w", err)
+		}
+		return updated, nil
 	case BetaPolicyActionBlock:
 		msg := errMsg
 		if msg == "" {
@@ -6060,6 +6095,9 @@ func (s *OpenAIGatewayService) applyOpenAIFastPolicyToBody(ctx context.Context, 
 		}
 		return body, &OpenAIFastBlockedError{Message: msg}
 	case BetaPolicyActionFilter:
+		if !tierResult.Exists() {
+			return body, nil
+		}
 		trimmed, err := sjson.DeleteBytes(body, "service_tier")
 		if err != nil {
 			return body, fmt.Errorf("strip service_tier from body: %w", err)
@@ -6139,15 +6177,22 @@ func (s *OpenAIGatewayService) applyOpenAIFastPolicyToWSResponseCreate(
 	if frameType != "response.create" {
 		return frame, nil, nil
 	}
-	rawTier := gjson.GetBytes(frame, "service_tier").String()
-	if rawTier == "" {
-		return frame, nil, nil
+	tierResult := gjson.GetBytes(frame, "service_tier")
+	rawTier := tierResult.String()
+	normTier := ""
+	if rawTier != "" {
+		normTier = normalizedOpenAIServiceTierValue(rawTier)
 	}
-	normTier := normalizedOpenAIServiceTierValue(rawTier)
-	if normTier == "" {
-		return frame, nil, nil
+	if normTier == "" && rawTier != "" {
+		action, _ := s.evaluateOpenAIFastPolicy(ctx, account, model, "")
+		if action != OpenAIFastPolicyActionForce {
+			return frame, nil, nil
+		}
 	}
 	action, errMsg := s.evaluateOpenAIFastPolicy(ctx, account, model, normTier)
+	if normTier == "" && action != OpenAIFastPolicyActionForce {
+		return frame, nil, nil
+	}
 	switch action {
 	case BetaPolicyActionBlock:
 		msg := errMsg
@@ -6155,14 +6200,33 @@ func (s *OpenAIGatewayService) applyOpenAIFastPolicyToWSResponseCreate(
 			msg = fmt.Sprintf("openai service_tier=%s is not allowed for model %s", normTier, model)
 		}
 		return frame, &OpenAIFastBlockedError{Message: msg}, nil
+	case OpenAIFastPolicyActionForce:
+		if rawTier == OpenAIFastTierPriority {
+			return frame, nil, nil
+		}
+		updated, err := sjson.SetBytes(frame, "service_tier", OpenAIFastTierPriority)
+		if err != nil {
+			return frame, nil, fmt.Errorf("force service_tier on ws frame: %w", err)
+		}
+		return updated, nil, nil
 	case BetaPolicyActionFilter:
+		if !tierResult.Exists() {
+			return frame, nil, nil
+		}
 		trimmed, err := sjson.DeleteBytes(frame, "service_tier")
 		if err != nil {
 			return frame, nil, fmt.Errorf("strip service_tier from ws frame: %w", err)
 		}
 		return trimmed, nil, nil
 	default:
-		return frame, nil, nil
+		if normTier == rawTier {
+			return frame, nil, nil
+		}
+		updated, err := sjson.SetBytes(frame, "service_tier", normTier)
+		if err != nil {
+			return frame, nil, fmt.Errorf("normalize service_tier on ws frame: %w", err)
+		}
+		return updated, nil, nil
 	}
 }
 

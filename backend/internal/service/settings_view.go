@@ -388,6 +388,8 @@ const (
 	BetaPolicyActionFilter = "filter" // 过滤，从 beta header 中移除该 token
 	BetaPolicyActionBlock  = "block"  // 拦截，直接返回错误
 
+	OpenAIFastPolicyActionForce = "force" // 强制写入 service_tier=priority
+
 	BetaPolicyScopeAll     = "all"     // 所有账号类型
 	BetaPolicyScopeOAuth   = "oauth"   // 仅 OAuth 账号
 	BetaPolicyScopeAPIKey  = "apikey"  // 仅 API Key 账号
@@ -466,8 +468,8 @@ func DefaultBetaPolicySettings() *BetaPolicySettings {
 //   - "flex"：低优先级模式
 //   - 省略：normal 默认
 //
-// 本策略复用 BetaPolicyAction*/BetaPolicyScope* 常量语义，只是匹配键从
-// anthropic-beta header 换成 body 的 service_tier 字段。
+// 本策略复用 BetaPolicyAction*/BetaPolicyScope* 常量语义，并额外支持
+// force 动作；匹配键从 anthropic-beta header 换成 body 的 service_tier 字段。
 const (
 	OpenAIFastTierAny      = "all"      // 匹配任意已识别的 service_tier
 	OpenAIFastTierPriority = "priority" // 仅匹配 fast（priority）
@@ -477,7 +479,7 @@ const (
 // OpenAIFastPolicyRule 单条 OpenAI fast/flex 策略规则
 type OpenAIFastPolicyRule struct {
 	ServiceTier          string   `json:"service_tier"`                     // "priority" | "flex" | "auto" | "default" | "scale" | "all"
-	Action               string   `json:"action"`                           // "pass" | "filter" | "block"
+	Action               string   `json:"action"`                           // "pass" | "filter" | "block" | "force"
 	Scope                string   `json:"scope"`                            // "all" | "oauth" | "apikey" | "bedrock"
 	ErrorMessage         string   `json:"error_message,omitempty"`          // 自定义错误消息 (action=block 时生效)
 	ModelWhitelist       []string `json:"model_whitelist,omitempty"`        // 模型匹配模式列表（为空=对所有模型生效）

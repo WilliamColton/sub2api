@@ -5922,6 +5922,7 @@ export default {
         actionPass: 'Pass (keep service_tier)',
         actionFilter: 'Filter (remove service_tier)',
         actionBlock: 'Block (reject request)',
+        actionForce: 'Force on (set priority)',
         scope: 'Scope',
         scopeAll: 'All accounts',
         scopeOAuth: 'OAuth only',

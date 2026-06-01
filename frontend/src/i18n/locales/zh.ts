@@ -6081,6 +6081,7 @@ export default {
         actionPass: '透传（保留 service_tier）',
         actionFilter: '过滤（移除 service_tier）',
         actionBlock: '拦截（拒绝请求）',
+        actionForce: '强制开启（写入 priority）',
         scope: '生效范围',
         scopeAll: '全部账号',
         scopeOAuth: '仅 OAuth 账号',

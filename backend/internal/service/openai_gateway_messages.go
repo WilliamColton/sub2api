@@ -390,9 +390,8 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		if promptCacheKey != "" && anthropicDigestChain != "" {
 			s.bindOpenAICompatAnthropicDigestPromptCacheKey(account, apiKeyID, anthropicDigestChain, promptCacheKey, anthropicMatchedDigestChain)
 		}
-		if responsesReq.ServiceTier != "" {
-			st := responsesReq.ServiceTier
-			result.ServiceTier = &st
+		if serviceTier := extractOpenAIServiceTierFromBody(responsesBody); serviceTier != nil {
+			result.ServiceTier = serviceTier
 		}
 		if responsesReq.Reasoning != nil && responsesReq.Reasoning.Effort != "" {
 			re := responsesReq.Reasoning.Effort
@@ -975,6 +974,9 @@ func (s *OpenAIGatewayService) forwardAsAnthropicViaChatCompletions(
 		return nil, fmt.Errorf("convert anthropic to responses: %w", err)
 	}
 	responsesReq.Stream = true // upstream always streams
+	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) {
+		responsesReq.ServiceTier = OpenAIFastTierPriority
+	}
 
 	chatReq, err := apicompat.ResponsesRequestToChatCompletions(responsesReq)
 	if err != nil {
@@ -993,6 +995,16 @@ func (s *OpenAIGatewayService) forwardAsAnthropicViaChatCompletions(
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat completions request: %w", err)
 	}
+	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, chatBody)
+	if policyErr != nil {
+		var blocked *OpenAIFastBlockedError
+		if errors.As(policyErr, &blocked) {
+			writeAnthropicError(c, http.StatusForbidden, "forbidden_error", blocked.Message)
+		}
+		return nil, policyErr
+	}
+	chatBody = updatedBody
+	serviceTier := extractOpenAIServiceTierFromBody(chatBody)
 
 	// Ensure reasoning_content is present on all assistant messages when
 	// thinking mode is active (same guard as forwardAsRawChatCompletions).
@@ -1108,6 +1120,9 @@ func (s *OpenAIGatewayService) forwardAsAnthropicViaChatCompletions(
 		result, handleErr = s.handleAnthropicStreamingFromChatCompletions(resp, c, originalModel, billingModel, upstreamModel, startTime)
 	} else {
 		result, handleErr = s.handleAnthropicBufferedFromChatCompletions(resp, c, originalModel, billingModel, upstreamModel, startTime)
+	}
+	if handleErr == nil && result != nil && serviceTier != nil {
+		result.ServiceTier = serviceTier
 	}
 
 	return result, handleErr
@@ -1452,9 +1467,9 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedFromChatCompletions(
 	c.JSON(http.StatusOK, anthropicResp)
 
 	result := &OpenAIForwardResult{
-		Usage:    usage,
+		Usage:        usage,
 		FirstTokenMs: firstTokenMs,
-		Model:    originalModel,
+		Model:        originalModel,
 	}
 	return result, nil
 }

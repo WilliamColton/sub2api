@@ -8,6 +8,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type openAIFastPolicyRepoStub struct {
@@ -222,6 +223,29 @@ func TestApplyOpenAIFastPolicyToBody_UnknownTierStripped(t *testing.T) {
 	require.Equal(t, string(body), string(updated))
 }
 
+func TestApplyOpenAIFastPolicyToBody_ForceWritesPriority(t *testing.T) {
+	settings := &OpenAIFastPolicySettings{
+		Rules: []OpenAIFastPolicyRule{{
+			ServiceTier:    OpenAIFastTierAny,
+			Action:         OpenAIFastPolicyActionForce,
+			Scope:          BetaPolicyScopeAll,
+			ModelWhitelist: []string{},
+		}},
+	}
+	svc := newOpenAIGatewayServiceWithSettings(t, settings)
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	body := []byte(`{"model":"gpt-5.5"}`)
+	updated, err := svc.applyOpenAIFastPolicyToBody(context.Background(), account, "gpt-5.5", body)
+	require.NoError(t, err)
+	require.Equal(t, OpenAIFastTierPriority, gjson.GetBytes(updated, "service_tier").String())
+
+	body = []byte(`{"model":"gpt-5.5","service_tier":"flex"}`)
+	updated, err = svc.applyOpenAIFastPolicyToBody(context.Background(), account, "gpt-5.5", body)
+	require.NoError(t, err)
+	require.Equal(t, OpenAIFastTierPriority, gjson.GetBytes(updated, "service_tier").String())
+}
+
 func TestApplyOpenAIFastPolicyToBody_BlockReturnsTypedError(t *testing.T) {
 	settings := &OpenAIFastPolicySettings{
 		Rules: []OpenAIFastPolicyRule{{
@@ -273,7 +297,7 @@ func TestSetOpenAIFastPolicySettings_Validation(t *testing.T) {
 	err = svc.SetOpenAIFastPolicySettings(context.Background(), &OpenAIFastPolicySettings{
 		Rules: []OpenAIFastPolicyRule{{
 			ServiceTier: OpenAIFastTierPriority,
-			Action:      BetaPolicyActionFilter,
+			Action:      OpenAIFastPolicyActionForce,
 			Scope:       BetaPolicyScopeAll,
 		}},
 	})

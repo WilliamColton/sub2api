@@ -41,7 +41,6 @@ func (s *OpenAIGatewayService) forwardAsLegacyCompletionsFromChat(
 	clientStream := chatReq.Stream
 	includeUsage := chatReq.StreamOptions != nil && chatReq.StreamOptions.IncludeUsage
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, originalModel)
-	serviceTier := extractOpenAIServiceTierFromBody(body)
 
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
@@ -57,15 +56,7 @@ func (s *OpenAIGatewayService) forwardAsLegacyCompletionsFromChat(
 	if err != nil {
 		return nil, fmt.Errorf("marshal legacy completions request: %w", err)
 	}
-	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, upstreamBody)
-	if policyErr != nil {
-		var blocked *OpenAIFastBlockedError
-		if errors.As(policyErr, &blocked) {
-			writeChatCompletionsError(c, http.StatusForbidden, "permission_error", blocked.Message)
-		}
-		return nil, policyErr
-	}
-	upstreamBody = updatedBody
+	serviceTier := extractOpenAIServiceTierFromBody(upstreamBody)
 
 	logger.L().Debug("openai chat_completions legacy_completions: forwarding with protocol conversion",
 		zap.Int64("account_id", account.ID),

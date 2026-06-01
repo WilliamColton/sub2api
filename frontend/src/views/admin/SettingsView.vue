@@ -1158,7 +1158,7 @@
                     <Select
                       :modelValue="rule.action"
                       @update:modelValue="
-                        rule.action = $event as 'pass' | 'filter' | 'block'
+                        rule.action = $event as 'pass' | 'filter' | 'block' | 'force'
                       "
                       :options="openaiFastPolicyActionOptions"
                     />
@@ -1297,6 +1297,7 @@
                         | 'pass'
                         | 'filter'
                         | 'block'
+                        | 'force'
                     "
                     :options="openaiFastPolicyActionOptions"
                   />
@@ -8203,6 +8204,7 @@ const openaiFastPolicyActionOptions = computed(() => [
   { value: "pass", label: t("admin.settings.openaiFastPolicy.actionPass") },
   { value: "filter", label: t("admin.settings.openaiFastPolicy.actionFilter") },
   { value: "block", label: t("admin.settings.openaiFastPolicy.actionBlock") },
+  { value: "force", label: t("admin.settings.openaiFastPolicy.actionForce") },
 ]);
 
 const openaiFastPolicyScopeOptions = computed(() => [
