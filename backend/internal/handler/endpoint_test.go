@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -25,7 +24,7 @@ func TestNormalizeInboundEndpoint(t *testing.T) {
 		// Direct canonical paths.
 		{"/v1/messages", EndpointMessages},
 		{"/v1/chat/completions", EndpointChatCompletions},
-		{"/v1/completions", EndpointCompletions},
+		{"/v1/embeddings", EndpointEmbeddings},
 		{"/v1/responses", EndpointResponses},
 		{"/v1/images/generations", EndpointImagesGenerations},
 		{"/v1/images/edits", EndpointImagesEdits},
@@ -79,6 +78,7 @@ func TestDeriveUpstreamEndpoint(t *testing.T) {
 		{"openai responses nested", EndpointResponses, "/openai/v1/responses/compact/detail", service.PlatformOpenAI, "/v1/responses/compact/detail"},
 		{"openai from messages", EndpointMessages, "/v1/messages", service.PlatformOpenAI, EndpointResponses},
 		{"openai from completions", EndpointChatCompletions, "/v1/chat/completions", service.PlatformOpenAI, EndpointResponses},
+		{"openai embeddings", EndpointEmbeddings, "/v1/embeddings", service.PlatformOpenAI, EndpointEmbeddings},
 		{"openai image generations", EndpointImagesGenerations, "/v1/images/generations", service.PlatformOpenAI, EndpointImagesGenerations},
 		{"openai image edits", EndpointImagesEdits, "/openai/v1/images/edits", service.PlatformOpenAI, EndpointImagesEdits},
 
@@ -160,20 +160,4 @@ func TestGetUpstreamEndpoint_FullFlow(t *testing.T) {
 
 	got := GetUpstreamEndpoint(c, service.PlatformOpenAI)
 	require.Equal(t, "/v1/responses/compact", got)
-}
-
-func TestResolveOpenAIChatCompletionsUpstreamEndpoint(t *testing.T) {
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	c.Set(ctxKeyInboundEndpoint, EndpointChatCompletions)
-
-	legacyAccount := &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Extra: map[string]any{openai_compat.ExtraKeyUpstreamAPI: string(openai_compat.OpenAIUpstreamAPILegacyCompletions)}}
-	require.Equal(t, EndpointCompletions, resolveOpenAIChatCompletionsUpstreamEndpoint(c, legacyAccount))
-
-	chatAccount := &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, Extra: map[string]any{openai_compat.ExtraKeyResponsesSupported: false}}
-	require.Equal(t, EndpointChatCompletions, resolveOpenAIChatCompletionsUpstreamEndpoint(c, chatAccount))
-
-	responsesAccount := &service.Account{Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey}
-	require.Equal(t, EndpointResponses, resolveOpenAIChatCompletionsUpstreamEndpoint(c, responsesAccount))
 }

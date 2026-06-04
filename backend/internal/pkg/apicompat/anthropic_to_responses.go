@@ -22,12 +22,19 @@ func AnthropicToResponses(req *AnthropicRequest) (*ResponsesRequest, error) {
 	}
 
 	out := &ResponsesRequest{
-		Model:       req.Model,
-		Input:       inputJSON,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stream:      req.Stream,
-		Include:     []string{"reasoning.encrypted_content"},
+		Model:   req.Model,
+		Input:   inputJSON,
+		Stream:  req.Stream,
+		Include: []string{"reasoning.encrypted_content"},
+	}
+
+	// Reasoning models (gpt-5.x) served via the Responses API do not accept
+	// sampling parameters. Sending temperature or top_p causes a 400
+	// "Unsupported parameter" error, so we only forward them for non-reasoning
+	// models.
+	if !isReasoningModel(req.Model) {
+		out.Temperature = req.Temperature
+		out.TopP = req.TopP
 	}
 
 	storeFalse := false
@@ -250,8 +257,7 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 // anthropicAssistantToResponses handles an Anthropic assistant message.
 // Text content → assistant message with output_text parts.
 // tool_use blocks → function_call items.
-// thinking blocks → preserved as content parts with type "thinking" so that
-// providers requiring reasoning_content (e.g. DeepSeek) can receive it back.
+// thinking blocks → ignored (OpenAI doesn't accept them as input).
 func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, error) {
 	// Try plain string.
 	var s string
@@ -271,25 +277,11 @@ func anthropicAssistantToResponses(raw json.RawMessage) ([]ResponsesInputItem, e
 
 	var items []ResponsesInputItem
 
-	// Build content parts: thinking blocks + text blocks together.
-	var contentParts []ResponsesContentPart
-	for _, b := range blocks {
-		switch b.Type {
-		case "thinking":
-			// Skip: "thinking" is not a valid Responses content part type.
-			// Reasoning from prior turns is handled via reasoning_content in
-			// the Chat Completions path and is not needed in Responses input.
-		case "text":
-			if b.Text != "" {
-				contentParts = append(contentParts, ResponsesContentPart{
-					Type: "output_text",
-					Text: b.Text,
-				})
-			}
-		}
-	}
-	if len(contentParts) > 0 {
-		partsJSON, err := json.Marshal(contentParts)
+	// Text content → assistant message with output_text content parts.
+	text := extractAnthropicTextFromBlocks(blocks)
+	if text != "" {
+		parts := []ResponsesContentPart{{Type: "output_text", Text: text}}
+		partsJSON, err := json.Marshal(parts)
 		if err != nil {
 			return nil, err
 		}
@@ -450,6 +442,14 @@ func convertAnthropicToolsToResponses(tools []AnthropicTool) []ResponsesTool {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+// isReasoningModel reports whether model is a reasoning model that does not
+// support sampling parameters (temperature, top_p) via the Responses API.
+// All gpt-5.x models are reasoning-only; the Responses API returns
+// "Unsupported parameter: temperature" if these fields are present.
+func isReasoningModel(model string) bool {
+	return strings.HasPrefix(model, "gpt-5")
 }
 
 // normalizeToolParameters ensures the tool parameter schema is valid for

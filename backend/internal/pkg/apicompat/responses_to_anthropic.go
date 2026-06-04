@@ -27,14 +27,12 @@ func ResponsesToAnthropic(resp *ResponsesResponse, model string) *AnthropicRespo
 		switch item.Type {
 		case "reasoning":
 			summaryText := ""
-			hasReasoning := false
 			for _, s := range item.Summary {
-				if s.Type == "summary_text" {
-					hasReasoning = true
+				if s.Type == "summary_text" && s.Text != "" {
 					summaryText += s.Text
 				}
 			}
-			if hasReasoning {
+			if summaryText != "" {
 				blocks = append(blocks, AnthropicContentBlock{
 					Type:     "thinking",
 					Thinking: summaryText,
@@ -569,6 +567,12 @@ func resToAnthHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	events = append(events, closeCurrentBlock(state)...)
 
 	stopReason := "end_turn"
+	if evt.Usage != nil {
+		usage := anthropicUsageFromResponsesUsage(evt.Usage)
+		state.InputTokens = usage.InputTokens
+		state.OutputTokens = usage.OutputTokens
+		state.CacheReadInputTokens = usage.CacheReadInputTokens
+	}
 	if evt.Response != nil {
 		if evt.Response.Usage != nil {
 			usage := anthropicUsageFromResponsesUsage(evt.Response.Usage)

@@ -30,11 +30,16 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 		Model:        req.Model,
 		Instructions: req.Instructions,
 		Input:        inputJSON,
-		Temperature:  req.Temperature,
-		TopP:         req.TopP,
 		Stream:       true, // upstream always streams
 		Include:      []string{"reasoning.encrypted_content"},
 		ServiceTier:  req.ServiceTier,
+	}
+
+	// Reasoning models (gpt-5.x) do not accept sampling parameters.
+	// See isReasoningModel in anthropic_to_responses.go.
+	if !isReasoningModel(req.Model) {
+		out.Temperature = req.Temperature
+		out.TopP = req.TopP
 	}
 
 	storeFalse := false
@@ -72,7 +77,7 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 	// tool_choice: already compatible format — pass through directly.
 	// Legacy function_call needs mapping.
 	if len(req.ToolChoice) > 0 {
-		out.ToolChoice = convertChatToolChoiceToResponses(req.ToolChoice)
+		out.ToolChoice = req.ToolChoice
 	} else if len(req.FunctionCall) > 0 {
 		tc, err := convertChatFunctionCallToToolChoice(req.FunctionCall)
 		if err != nil {
@@ -148,35 +153,31 @@ func chatUserToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 // text content and tool_calls, the text is emitted as an assistant message
 // first, then each tool_call becomes a function_call item. If the content is
 // empty/nil and there are tool_calls, only function_call items are emitted.
-// ReasoningContent is preserved as thinking content parts for providers that
-// require it (e.g. DeepSeek).
 func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 	var items []ResponsesInputItem
+	content := ""
 
-	// Build content parts: thinking (from ReasoningContent) + text.
-	var contentParts []ResponsesContentPart
-	if m.ReasoningContent != nil {
-		contentParts = append(contentParts, ResponsesContentPart{
-			Type: "thinking",
-			Text: *m.ReasoningContent,
-		})
+	if m.ReasoningContent != "" {
+		content = "<thinking>" + m.ReasoningContent + "</thinking>"
 	}
 
+	// Emit assistant message with output_text if content is non-empty.
 	if len(m.Content) > 0 {
 		s, err := parseAssistantContent(m.Content)
 		if err != nil {
 			return nil, err
 		}
 		if s != "" {
-			contentParts = append(contentParts, ResponsesContentPart{
-				Type: "output_text",
-				Text: s,
-			})
+			if content != "" {
+				content += "\n"
+			}
+			content += s
 		}
 	}
 
-	if len(contentParts) > 0 {
-		partsJSON, err := json.Marshal(contentParts)
+	if content != "" {
+		parts := []ResponsesContentPart{{Type: "output_text", Text: content}}
+		partsJSON, err := json.Marshal(parts)
 		if err != nil {
 			return nil, err
 		}
@@ -341,7 +342,14 @@ func marshalChatInputContent(content chatMessageContent) (json.RawMessage, error
 	if content.Text != nil {
 		return json.Marshal(*content.Text)
 	}
-	return json.Marshal(convertChatContentPartsToResponses(content.Parts))
+	parts := convertChatContentPartsToResponses(content.Parts)
+	if len(parts) == 0 {
+		// A nil slice marshals to JSON null, which the upstream Responses API
+		// rejects ("expected an array of objects or string, but got null").
+		// Fall back to an empty string when no usable parts remain.
+		return json.Marshal("")
+	}
+	return json.Marshal(parts)
 }
 
 func convertChatContentPartsToResponses(parts []ChatContentPart) []ResponsesContentPart {
@@ -410,7 +418,7 @@ func convertChatToolsToResponses(tools []ChatTool, functions []ChatFunction) []R
 			Type:        "function",
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
-			Parameters:  normalizeToolParameters(t.Function.Parameters),
+			Parameters:  t.Function.Parameters,
 			Strict:      t.Function.Strict,
 		}
 		out = append(out, rt)
@@ -422,7 +430,7 @@ func convertChatToolsToResponses(tools []ChatTool, functions []ChatFunction) []R
 			Type:        "function",
 			Name:        f.Name,
 			Description: f.Description,
-			Parameters:  normalizeToolParameters(f.Parameters),
+			Parameters:  f.Parameters,
 			Strict:      f.Strict,
 		}
 		out = append(out, rt)
@@ -455,52 +463,4 @@ func convertChatFunctionCallToToolChoice(raw json.RawMessage) (json.RawMessage, 
 		"type": "function",
 		"name": obj.Name,
 	})
-}
-
-// convertChatToolChoiceToResponses normalizes the Chat Completions tool_choice
-// field into Responses API format.
-//
-// Chat Completions accepts a nested object form:
-//
-//	{"type":"function","function":{"name":"X"}}
-//
-// but Responses expects the flat form:
-//
-//	{"type":"function","name":"X"}
-//
-// String values ("auto", "none", "required") and already-flat objects pass through unchanged.
-func convertChatToolChoiceToResponses(raw json.RawMessage) json.RawMessage {
-	// String values — pass through.
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return raw
-	}
-
-	// Object form — normalize nested function.name to top-level name.
-	var obj struct {
-		Type     string `json:"type"`
-		Name     string `json:"name"`
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
-	}
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return raw
-	}
-	if obj.Type == "function" {
-		name := obj.Name
-		if name == "" {
-			name = obj.Function.Name
-		}
-		if name != "" {
-			result, err := json.Marshal(map[string]string{
-				"type": "function",
-				"name": name,
-			})
-			if err == nil {
-				return result
-			}
-		}
-	}
-	return raw
 }

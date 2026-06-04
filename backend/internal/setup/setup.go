@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -39,29 +38,22 @@ func setupDefaultAdminConcurrency() int {
 }
 
 // GetDataDir returns the data directory for storing config and lock files.
-// Priority: current directory > DATA_DIR env > /app/data (if exists and writable)
+// Priority: DATA_DIR env > /app/data (if exists and writable) > current directory
 func GetDataDir() string {
-	// Check current directory first — if config.yaml exists here, use it
-	if _, err := os.Stat(ConfigFileName); err == nil {
-		return "."
-	}
-
-	// Check DATA_DIR environment variable
+	// Check DATA_DIR environment variable first
 	if dir := os.Getenv("DATA_DIR"); dir != "" {
 		return dir
 	}
 
-	// Check if /app/data exists and is writable (Docker environment, Linux only)
-	if runtime.GOOS != "windows" {
-		dockerDataDir := "/app/data"
-		if info, err := os.Stat(dockerDataDir); err == nil && info.IsDir() {
-			// Try to check if writable by creating a temp file
-			testFile := dockerDataDir + "/.write_test"
-			if f, err := os.Create(testFile); err == nil {
-				_ = f.Close()
-				_ = os.Remove(testFile)
-				return dockerDataDir
-			}
+	// Check if /app/data exists and is writable (Docker environment)
+	dockerDataDir := "/app/data"
+	if info, err := os.Stat(dockerDataDir); err == nil && info.IsDir() {
+		// Try to check if writable by creating a temp file
+		testFile := dockerDataDir + "/.write_test"
+		if f, err := os.Create(testFile); err == nil {
+			_ = f.Close()
+			_ = os.Remove(testFile)
+			return dockerDataDir
 		}
 	}
 
@@ -190,7 +182,7 @@ func TestDatabaseConnection(cfg *DatabaseConfig) error {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
@@ -238,7 +230,7 @@ func TestDatabaseConnection(cfg *DatabaseConfig) error {
 		}
 	}()
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel2()
 
 	if err := targetDB.PingContext(ctx2); err != nil {
@@ -270,7 +262,7 @@ func TestRedisConnection(cfg *RedisConfig) error {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
@@ -353,7 +345,7 @@ func initializeDatabase(cfg *SetupConfig) error {
 		}
 	}()
 
-	migrationCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	migrationCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	return repository.ApplyMigrations(migrationCtx, db)
 }
@@ -377,7 +369,7 @@ func createAdminUser(cfg *SetupConfig) (bool, string, error) {
 	}()
 
 	// 使用超时上下文避免安装流程因数据库异常而长时间阻塞。
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var totalUsers int64

@@ -100,17 +100,9 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	if shouldMimicClaudeCode {
 		anthropicBody = s.applyClaudeCodeOAuthMimicryToBody(ctx, c, account, anthropicBody, anthropicReq.System, mappedModel)
-	} else {
-		// APIKey/ServiceAccount 账号：应用与 /v1/messages 路径一致的 cache_control 策略。
-		// CC 协议无 cache_control 概念，转换后的 Anthropic body 天然没有缓存断点——
-		// 此处补充注入确保上游 prompt 缓存可以命中。
-		anthropicBody = s.rewriteMessageCacheControlIfEnabled(ctx, anthropicBody)
-		if buildToolNameRewriteFromBody(anthropicBody) == nil {
-			anthropicBody = applyToolsLastCacheBreakpoint(anthropicBody)
-		}
 	}
 
-	// 7. Enforce cache_control block limit（所有注入后的最终安全兜底）
+	// 7. Enforce cache_control block limit
 	anthropicBody = enforceCacheControlLimit(anthropicBody)
 
 	// 8. Get access token
@@ -127,7 +119,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	// 10. Build upstream request
 	upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
-	upstreamReq, err := s.buildUpstreamRequest(upstreamCtx, c, account, anthropicBody, token, tokenType, mappedModel, reqStream, shouldMimicClaudeCode)
+	upstreamReq, _, err := s.buildUpstreamRequest(upstreamCtx, c, account, anthropicBody, token, tokenType, mappedModel, reqStream, shouldMimicClaudeCode)
 	releaseUpstreamCtx()
 	if err != nil {
 		return nil, fmt.Errorf("build upstream request: %w", err)
@@ -156,7 +148,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 
 	// 12. Handle error response with failover
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		respBody, _ := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
@@ -174,7 +166,7 @@ func (s *GatewayService) ForwardAsChatCompletions(
 				Message:            upstreamMsg,
 			})
 			if s.rateLimitService != nil {
-				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, mappedModel)
 			}
 			return nil, &UpstreamFailoverError{
 				StatusCode:   resp.StatusCode,

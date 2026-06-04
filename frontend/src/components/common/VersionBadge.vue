@@ -17,7 +17,6 @@
           v-else
           class="h-3 w-12 animate-pulse rounded bg-gray-200 font-medium dark:bg-dark-600"
         ></span>
-        <span v-if="frontendBuildId" class="font-mono text-[10px] opacity-75">FE {{ frontendBuildId }}</span>
         <!-- Update indicator -->
         <span v-if="hasUpdate" class="relative flex h-2 w-2">
           <span
@@ -111,9 +110,6 @@
                       ? t('version.latestVersion') + ': v' + latestVersion
                       : t('version.upToDate')
                   }}
-                </p>
-                <p v-if="frontendBuildId" class="mt-1 font-mono text-xs text-gray-500 dark:text-dark-400">
-                  FE {{ frontendBuildId }}
                 </p>
               </div>
 
@@ -412,7 +408,6 @@ const latestVersion = computed(() => appStore.latestVersion)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
-const frontendBuildId = __FRONTEND_BUILD_ID__
 
 // Update process states (local to this component)
 const updating = ref(false)

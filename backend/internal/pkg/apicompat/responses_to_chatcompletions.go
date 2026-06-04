@@ -10,242 +10,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Request conversion: ResponsesRequest → ChatCompletionsRequest
-// ---------------------------------------------------------------------------
-
-// ResponsesRequestToChatCompletions converts a Responses API request into a
-// Chat Completions request. This is used when the upstream only supports
-// /v1/chat/completions (e.g., DeepSeek, Kimi, GLM, Qwen).
-func ResponsesRequestToChatCompletions(req *ResponsesRequest) (*ChatCompletionsRequest, error) {
-	messages, err := convertResponsesInputToChatMessages(req.Input, req.Instructions)
-	if err != nil {
-		return nil, fmt.Errorf("convert responses input to chat messages: %w", err)
-	}
-
-	out := &ChatCompletionsRequest{
-		Model:             req.Model,
-		Messages:          messages,
-		Temperature:       req.Temperature,
-		TopP:              req.TopP,
-		Stream:            req.Stream,
-		ServiceTier:       req.ServiceTier,
-		ParallelToolCalls: req.ParallelToolCalls,
-	}
-
-	if req.MaxOutputTokens != nil {
-		out.MaxTokens = req.MaxOutputTokens
-	}
-
-	if len(req.Tools) > 0 {
-		out.Tools = convertResponsesToolsToChatTools(req.Tools)
-	}
-
-	if req.ToolChoice != nil {
-		out.ToolChoice = req.ToolChoice
-	}
-
-	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		out.ReasoningEffort = req.Reasoning.Effort
-	}
-
-	return out, nil
-}
-
-func convertResponsesInputToChatMessages(input json.RawMessage, instructions string) ([]ChatMessage, error) {
-	var messages []ChatMessage
-
-	// Add instructions as system message
-	if instructions != "" {
-		content, _ := json.Marshal(instructions)
-		messages = append(messages, ChatMessage{
-			Role:    "system",
-			Content: content,
-		})
-	}
-
-	// Try to parse as array of ResponsesInputItem
-	var items []ResponsesInputItem
-	if err := json.Unmarshal(input, &items); err != nil {
-		// Try to parse as plain string
-		var s string
-		if err2 := json.Unmarshal(input, &s); err2 != nil {
-			return nil, fmt.Errorf("unmarshal responses input: %w", err)
-		}
-		if s != "" {
-			content, _ := json.Marshal(s)
-			messages = append(messages, ChatMessage{
-				Role:    "user",
-				Content: content,
-			})
-		}
-		return messages, nil
-	}
-
-	for _, item := range items {
-		switch item.Type {
-		case "function_call":
-			toolCall := ChatToolCall{
-				ID:   item.CallID,
-				Type: "function",
-				Function: ChatFunctionCall{
-					Name:      item.Name,
-					Arguments: item.Arguments,
-				},
-			}
-			if len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
-				last := &messages[len(messages)-1]
-				last.ToolCalls = append(last.ToolCalls, toolCall)
-				continue
-			}
-			messages = append(messages, ChatMessage{
-				Role:      "assistant",
-				ToolCalls: []ChatToolCall{toolCall},
-			})
-		case "function_call_output":
-			content, _ := json.Marshal(item.Output)
-			messages = append(messages, ChatMessage{
-				Role:       "tool",
-				Content:    content,
-				ToolCallID: item.CallID,
-			})
-		default:
-			// Role-based messages (developer/system/user/assistant)
-			role := item.Role
-			if role == "" {
-				role = "user"
-			}
-			if role == "developer" {
-				role = "system"
-			}
-
-			content := convertResponsesContentToChatContent(item.Content)
-			reasoning := extractThinkingFromResponsesContent(item.Content)
-			msg := ChatMessage{
-				Role:    role,
-				Content: content,
-			}
-			if reasoning != nil {
-				msg.ReasoningContent = reasoning
-			}
-			messages = append(messages, msg)
-		}
-	}
-
-	return messages, nil
-}
-
-// extractThinkingFromResponsesContent extracts thinking/reasoning content from
-// Responses content parts. Returns nil if no thinking parts are present; a
-// pointer to the concatenated thinking text otherwise (which may be an empty
-// string when thinking parts exist but carry no text — DeepSeek can emit empty
-// reasoning_content that must be preserved across round-trips).
-func extractThinkingFromResponsesContent(content json.RawMessage) *string {
-	if content == nil {
-		return nil
-	}
-
-	var parts []ResponsesContentPart
-	if err := json.Unmarshal(content, &parts); err != nil {
-		return nil
-	}
-
-	var thinking strings.Builder
-	hasThinking := false
-	for _, part := range parts {
-		if part.Type == "thinking" {
-			hasThinking = true
-			thinking.WriteString(part.Text)
-		}
-	}
-	if !hasThinking {
-		return nil
-	}
-	result := thinking.String()
-	return &result
-}
-
-// convertResponsesContentToChatContent converts Responses API content format
-// to Chat Completions content format. The key difference is:
-// - Responses uses "input_text", "output_text", "input_image"
-// - Chat Completions uses "text", "image_url"
-// Thinking parts are filtered out (handled separately via ReasoningContent).
-func convertResponsesContentToChatContent(content json.RawMessage) json.RawMessage {
-	if content == nil {
-		return json.RawMessage(`""`)
-	}
-
-	// Try to parse as string (simple case)
-	var s string
-	if err := json.Unmarshal(content, &s); err == nil {
-		return content
-	}
-
-	// Try to parse as array of content parts
-	var parts []ResponsesContentPart
-	if err := json.Unmarshal(content, &parts); err != nil {
-		// Return as-is if we can't parse it
-		return content
-	}
-
-	// Convert to ChatContentPart format, filtering out thinking parts
-	var chatParts []ChatContentPart
-	for _, part := range parts {
-		switch part.Type {
-		case "input_text", "output_text":
-			chatParts = append(chatParts, ChatContentPart{
-				Type: "text",
-				Text: part.Text,
-			})
-		case "input_image":
-			chatParts = append(chatParts, ChatContentPart{
-				Type: "image_url",
-				ImageURL: &ChatImageURL{
-					URL: part.ImageURL,
-				},
-			})
-		case "thinking":
-			// Filtered out — extracted separately as ReasoningContent
-		default:
-			// Pass through unknown types as text
-			chatParts = append(chatParts, ChatContentPart{
-				Type: "text",
-				Text: part.Text,
-			})
-		}
-	}
-
-	if len(chatParts) == 0 {
-		return json.RawMessage(`""`)
-	}
-
-	result, err := json.Marshal(chatParts)
-	if err != nil {
-		return json.RawMessage(`""`)
-	}
-	return result
-}
-
-func convertResponsesToolsToChatTools(tools []ResponsesTool) []ChatTool {
-	var chatTools []ChatTool
-	for _, t := range tools {
-		if t.Type == "function" {
-			chatTools = append(chatTools, ChatTool{
-				Type: "function",
-				Function: &ChatFunction{
-					Name:        t.Name,
-					Description: t.Description,
-					Parameters:  t.Parameters,
-					Strict:      t.Strict,
-				},
-			})
-		}
-		// Skip non-function tools (web_search, local_shell, etc.) as they
-		// don't have a direct Chat Completions equivalent
-	}
-	return chatTools
-}
-
-// ---------------------------------------------------------------------------
 // Non-streaming: ResponsesResponse → ChatCompletionsResponse
 // ---------------------------------------------------------------------------
 
@@ -267,7 +31,6 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 
 	var contentText string
 	var reasoningText string
-	var hasReasoning bool
 	var toolCalls []ChatToolCall
 
 	for _, item := range resp.Output {
@@ -289,8 +52,7 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 			})
 		case "reasoning":
 			for _, s := range item.Summary {
-				if s.Type == "summary_text" {
-					hasReasoning = true
+				if s.Type == "summary_text" && s.Text != "" {
 					reasoningText += s.Text
 				}
 			}
@@ -307,8 +69,8 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		raw, _ := json.Marshal(contentText)
 		msg.Content = raw
 	}
-	if hasReasoning {
-		msg.ReasoningContent = &reasoningText
+	if reasoningText != "" {
+		msg.ReasoningContent = reasoningText
 	}
 
 	finishReason := responsesStatusToChatFinishReason(resp.Status, resp.IncompleteDetails, toolCalls)
@@ -319,19 +81,7 @@ func ResponsesToChatCompletions(resp *ResponsesResponse, model string) *ChatComp
 		FinishReason: finishReason,
 	}}
 
-	if resp.Usage != nil {
-		usage := &ChatUsage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		}
-		if resp.Usage.InputTokensDetails != nil && resp.Usage.InputTokensDetails.CachedTokens > 0 {
-			usage.PromptTokensDetails = &ChatTokenDetails{
-				CachedTokens: resp.Usage.InputTokensDetails.CachedTokens,
-			}
-		}
-		out.Usage = usage
-	}
+	out.Usage = chatUsageFromResponsesUsage(resp.Usage)
 
 	return out
 }
@@ -531,20 +281,12 @@ func resToChatHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	state.Finalized = true
 	finishReason := "stop"
 
+	if evt.Usage != nil {
+		state.Usage = chatUsageFromResponsesUsage(evt.Usage)
+	}
 	if evt.Response != nil {
 		if evt.Response.Usage != nil {
-			u := evt.Response.Usage
-			usage := &ChatUsage{
-				PromptTokens:     u.InputTokens,
-				CompletionTokens: u.OutputTokens,
-				TotalTokens:      u.InputTokens + u.OutputTokens,
-			}
-			if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
-				usage.PromptTokensDetails = &ChatTokenDetails{
-					CachedTokens: u.InputTokensDetails.CachedTokens,
-				}
-			}
-			state.Usage = usage
+			state.Usage = chatUsageFromResponsesUsage(evt.Response.Usage)
 		}
 
 		switch evt.Response.Status {
@@ -576,6 +318,57 @@ func resToChatHandleCompleted(evt *ResponsesStreamEvent, state *ResponsesEventTo
 	}
 
 	return chunks
+}
+
+func chatUsageFromResponsesUsage(u *ResponsesUsage) *ChatUsage {
+	if u == nil {
+		return nil
+	}
+	usage := &ChatUsage{
+		PromptTokens:     u.InputTokens,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      u.InputTokens + u.OutputTokens,
+	}
+	usage.PromptTokensDetails = promptDetailsFromResponses(u.InputTokensDetails)
+	usage.CompletionTokensDetails = completionDetailsFromResponses(u.OutputTokensDetails)
+	return usage
+}
+
+// promptDetailsFromResponses maps Responses-API input_tokens_details into a
+// Chat-Completions prompt_tokens_details. Returns nil when nothing would be
+// emitted, so upstreams that do not break down prompt usage stay clean.
+func promptDetailsFromResponses(src *ResponsesInputTokensDetails) *ChatTokenDetails {
+	if src == nil {
+		return nil
+	}
+	if src.CachedTokens == 0 && src.AudioTokens == 0 {
+		return nil
+	}
+	return &ChatTokenDetails{
+		CachedTokens: src.CachedTokens,
+		AudioTokens:  src.AudioTokens,
+	}
+}
+
+// completionDetailsFromResponses maps Responses-API output_tokens_details
+// into a Chat-Completions completion_tokens_details. Mirrors the OpenAI
+// official CompletionUsage schema: reasoning_tokens, audio_tokens, and
+// the predicted-outputs accepted/rejected counts. Returns nil when nothing
+// would be emitted so non-reasoning, non-audio responses stay clean.
+func completionDetailsFromResponses(src *ResponsesOutputTokensDetails) *ChatTokenDetails {
+	if src == nil {
+		return nil
+	}
+	if src.ReasoningTokens == 0 && src.AudioTokens == 0 &&
+		src.AcceptedPredictionTokens == 0 && src.RejectedPredictionTokens == 0 {
+		return nil
+	}
+	return &ChatTokenDetails{
+		ReasoningTokens:          src.ReasoningTokens,
+		AudioTokens:              src.AudioTokens,
+		AcceptedPredictionTokens: src.AcceptedPredictionTokens,
+		RejectedPredictionTokens: src.RejectedPredictionTokens,
+	}
 }
 
 func makeChatDeltaChunk(state *ResponsesEventToChatState, delta ChatDelta) ChatCompletionsChunk {
@@ -631,7 +424,6 @@ type bufferedFuncCall struct {
 type BufferedResponseAccumulator struct {
 	text                 strings.Builder
 	reasoning            strings.Builder
-	hasReasoning         bool
 	funcCalls            []bufferedFuncCall
 	outputIndexToFuncIdx map[int]int
 }
@@ -668,7 +460,6 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 			}
 		}
 	case "response.reasoning_summary_text.delta":
-		a.hasReasoning = true
 		if event.Delta != "" {
 			_, _ = a.reasoning.WriteString(event.Delta)
 		}
@@ -677,7 +468,7 @@ func (a *BufferedResponseAccumulator) ProcessEvent(event *ResponsesStreamEvent) 
 
 // HasContent reports whether any content has been accumulated.
 func (a *BufferedResponseAccumulator) HasContent() bool {
-	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.hasReasoning
+	return a.text.Len() > 0 || len(a.funcCalls) > 0 || a.reasoning.Len() > 0
 }
 
 // BuildOutput constructs a []ResponsesOutput from the accumulated delta
@@ -686,7 +477,7 @@ func (a *BufferedResponseAccumulator) HasContent() bool {
 func (a *BufferedResponseAccumulator) BuildOutput() []ResponsesOutput {
 	var out []ResponsesOutput
 
-	if a.hasReasoning {
+	if a.reasoning.Len() > 0 {
 		out = append(out, ResponsesOutput{
 			Type: "reasoning",
 			Summary: []ResponsesSummary{{

@@ -63,7 +63,6 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	account *Account,
 	body []byte,
 	defaultMappedModel string,
-	promptCacheKey string,
 ) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 
@@ -75,8 +74,9 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	}
 	clientStream := gjson.GetBytes(body, "stream").Bool()
 
-	// 1b. Extract reasoning effort from the raw body before any transformation.
+	// 1b. Extract reasoning effort and service tier from the raw body before any transformation.
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(body, originalModel)
+	serviceTier := extractOpenAIServiceTierFromBody(body)
 
 	// 2. Resolve model mapping (same as ForwardAsChatCompletions)
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
@@ -93,12 +93,12 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if policyErr != nil {
 		var blocked *OpenAIFastBlockedError
 		if errors.As(policyErr, &blocked) {
+			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
 			writeChatCompletionsError(c, http.StatusForbidden, "permission_error", blocked.Message)
 		}
 		return nil, policyErr
 	}
 	upstreamBody = updatedBody
-	serviceTier := extractOpenAIServiceTierFromBody(upstreamBody)
 	if clientStream {
 		var usageErr error
 		upstreamBody, usageErr = ensureOpenAIChatStreamUsage(upstreamBody)
@@ -106,12 +106,6 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 			return nil, fmt.Errorf("enable stream usage: %w", usageErr)
 		}
 	}
-
-	// 4b. Ensure reasoning_content is present on all assistant messages when
-	// thinking mode is active. DeepSeek requires this field to be passed back
-	// in multi-turn conversations; missing fields cause 400:
-	// "The reasoning_content in the thinking mode must be passed back to the API."
-	upstreamBody = ensureReasoningContentInAssistantMessages(upstreamBody)
 
 	logger.L().Debug("openai chat_completions raw: forwarding without protocol conversion",
 		zap.Int64("account_id", account.ID),
@@ -142,6 +136,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	if err != nil {
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
+	upstreamReq = upstreamReq.WithContext(WithHTTPUpstreamProfile(upstreamReq.Context(), HTTPUpstreamProfileOpenAI))
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
 	if clientStream {
@@ -162,9 +157,6 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	customUA := account.GetOpenAIUserAgent()
 	if customUA != "" {
 		upstreamReq.Header.Set("user-agent", customUA)
-	}
-	if promptCacheKey != "" {
-		upstreamReq.Header.Set("session_id", promptCacheKey)
 	}
 
 	// 6. Send request
@@ -191,7 +183,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 
 	// 7. Handle error response with failover
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		respBody := s.readUpstreamErrorBody(resp)
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 
@@ -216,21 +208,19 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			if s.rateLimitService != nil {
-				s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
-			}
+			s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, upstreamModel)
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
-				RetryableOnSameAccount: account.IsPoolMode() && (isPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
+				RetryableOnSameAccount: account.IsPoolMode() && (account.IsPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
 			}
 		}
-		return s.handleChatCompletionsErrorResponse(resp, c, account)
+		return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 	}
 
 	// 8. Forward response
 	if clientStream {
-		return s.streamRawChatCompletions(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body))
 	}
 	return s.bufferRawChatCompletions(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }
@@ -244,23 +234,32 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 func (s *OpenAIGatewayService) streamRawChatCompletions(
 	c *gin.Context,
 	resp *http.Response,
+	account *Account,
 	originalModel string,
 	billingModel string,
 	upstreamModel string,
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	requestBodyLen int,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 
-	if s.responseHeaderFilter != nil {
-		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	headersWritten := false
+	writeStreamHeaders := func() {
+		if headersWritten {
+			return
+		}
+		headersWritten = true
+		if s.responseHeaderFilter != nil {
+			responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+		}
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.WriteHeader(http.StatusOK)
 	}
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	c.Writer.WriteHeader(http.StatusOK)
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -272,9 +271,45 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	var usage OpenAIUsage
 	var firstTokenMs *int
 	clientDisconnected := false
+	clientOutputStarted := false
+	pendingLines := make([]string, 0, 8)
+	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
+
+	writeLine := func(line string) {
+		if clientDisconnected {
+			return
+		}
+		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
+			pendingLines = append(pendingLines, line)
+			return
+		}
+		if !clientOutputStarted {
+			writeStreamHeaders()
+			for _, pending := range pendingLines {
+				if _, werr := c.Writer.WriteString(pending + "\n"); werr != nil {
+					clientDisconnected = true
+					logger.L().Debug("openai chat_completions raw: client disconnected, continuing to drain upstream for billing",
+						zap.Error(werr),
+						zap.String("request_id", requestID),
+					)
+					return
+				}
+			}
+			pendingLines = pendingLines[:0]
+			clientOutputStarted = true
+		}
+		if _, werr := c.Writer.WriteString(line + "\n"); werr != nil {
+			clientDisconnected = true
+			logger.L().Debug("openai chat_completions raw: client disconnected, continuing to drain upstream for billing",
+				zap.Error(werr),
+				zap.String("request_id", requestID),
+			)
+		}
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
 			if trimmedPayload != "[DONE]" {
@@ -289,22 +324,14 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 			}
 		}
 
-		if !clientDisconnected {
-			if _, werr := c.Writer.WriteString(line + "\n"); werr != nil {
-				clientDisconnected = true
-				logger.L().Debug("openai chat_completions raw: client disconnected, continuing to drain upstream for billing",
-					zap.Error(werr),
-					zap.String("request_id", requestID),
-				)
-			}
-		}
+		writeLine(line)
 		if line == "" {
-			if !clientDisconnected {
+			if !clientDisconnected && clientOutputStarted {
 				c.Writer.Flush()
 			}
 			continue
 		}
-		if !clientDisconnected {
+		if !clientDisconnected && clientOutputStarted {
 			c.Writer.Flush()
 		}
 	}
@@ -315,6 +342,27 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 				zap.Error(err),
 				zap.String("request_id", requestID),
 			)
+		}
+	} else if !clientDisconnected && !clientOutputStarted {
+		if refusalDetector.IsSilentRefusal() {
+			return nil, newOpenAISilentRefusalFailoverError(c, account, requestID)
+		}
+		if len(pendingLines) > 0 {
+			writeStreamHeaders()
+			for _, pending := range pendingLines {
+				if _, werr := c.Writer.WriteString(pending + "\n"); werr != nil {
+					clientDisconnected = true
+					logger.L().Debug("openai chat_completions raw: client disconnected during final flush",
+						zap.Error(werr),
+						zap.String("request_id", requestID),
+					)
+					break
+				}
+			}
+			if !clientDisconnected {
+				c.Writer.Flush()
+				clientOutputStarted = true
+			}
 		}
 	}
 
@@ -432,61 +480,10 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 //
 //   - base 已是 /chat/completions：原样返回
 //   - base 以 /v1 结尾：追加 /chat/completions
+//   - base 以其他版本段结尾（如 /v4）：追加 /chat/completions
 //   - 其他情况：追加 /v1/chat/completions
 //
 // 与 buildOpenAIResponsesURL 是姐妹函数。
 func buildOpenAIChatCompletionsURL(base string) string {
-	normalized := strings.TrimRight(strings.TrimSpace(base), "/")
-	if strings.HasSuffix(normalized, "/chat/completions") {
-		return normalized
-	}
-	if strings.HasSuffix(normalized, "/v1") {
-		return normalized + "/chat/completions"
-	}
-	return normalized + "/v1/chat/completions"
-}
-
-// ensureReasoningContentInAssistantMessages ensures every assistant message
-// carries a reasoning_content field.
-//
-// DeepSeek (and potentially other providers) requires reasoning_content to be
-// present in all assistant messages during multi-turn conversations when thinking
-// mode is active; missing fields cause a 400 error:
-// "The reasoning_content in the thinking mode must be passed back to the API."
-//
-// Detection of thinking mode is unreliable: models may have thinking on by
-// default without explicit parameters, and clients may strip reasoning_content
-// from conversation history. An empty string satisfies the requirement, and
-// reasoning_content is a standard OpenAI message field that non-thinking
-// models safely ignore. We therefore inject unconditionally.
-func ensureReasoningContentInAssistantMessages(body []byte) []byte {
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.Exists() || !messages.IsArray() {
-		return body
-	}
-
-	result := body
-	modified := false
-	for i, msg := range messages.Array() {
-		if msg.Get("role").String() != "assistant" {
-			continue
-		}
-		if msg.Get("reasoning_content").Exists() {
-			continue
-		}
-		var err error
-		result, err = sjson.SetBytes(result, fmt.Sprintf("messages.%d.reasoning_content", i), "")
-		if err != nil {
-			return body
-		}
-		modified = true
-	}
-
-	if modified {
-		logger.L().Debug("openai chat_completions raw: injected missing reasoning_content",
-			zap.Int("message_count", len(messages.Array())),
-		)
-	}
-
-	return result
+	return buildOpenAIEndpointURL(base, "/v1/chat/completions")
 }
