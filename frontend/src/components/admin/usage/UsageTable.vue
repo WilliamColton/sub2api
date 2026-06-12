@@ -446,17 +446,6 @@ function accountBilled(row: { total_cost?: number | null; account_stats_cost?: n
 }
 
 
-function isImageUsage(row: Pick<AdminUsageLog, 'image_count'> | null | undefined): boolean {
-  return (row?.image_count ?? 0) > 0
-}
-
-function getDisplayBillingMode(row: Pick<AdminUsageLog, 'billing_mode' | 'image_count'> | null | undefined): string | null | undefined {
-  if (isImageUsage(row)) {
-    return BILLING_MODE_IMAGE
-  }
-  return row?.billing_mode
-}
-
 import DataTable from '@/components/common/DataTable.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Icon from '@/components/icons/Icon.vue'

@@ -778,17 +778,6 @@ const formatDuration = (ms: number | null | undefined): string => {
 }
 
 
-const isImageUsage = (row: Pick<UsageLog, 'image_count'> | null | undefined): boolean => {
-  return (row?.image_count ?? 0) > 0
-}
-
-const getDisplayBillingMode = (row: Pick<UsageLog, 'billing_mode' | 'image_count'> | null | undefined): string | null | undefined => {
-  if (isImageUsage(row)) {
-    return BILLING_MODE_IMAGE
-  }
-  return row?.billing_mode
-}
-
 const formatUserAgent = (ua: string): string => {
   return ua
 }
