@@ -73,6 +73,13 @@ type AnthropicContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"` // string or []AnthropicContentBlock
 	IsError   bool            `json:"is_error,omitempty"`
+
+	// type=document (Claude Code @file references)
+	// Source is reused from type=image — document.source has the same structure
+	// (type/media_type/data). Title is the filename, Context is an optional
+	// description string.
+	Title   string `json:"title,omitempty"`
+	Context string `json:"context,omitempty"`
 }
 
 func (b AnthropicContentBlock) MarshalJSON() ([]byte, error) {

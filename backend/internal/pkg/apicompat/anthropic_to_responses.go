@@ -166,6 +166,14 @@ func parseAnthropicSystemContentParts(raw json.RawMessage) ([]ResponsesContentPa
 		if b.Type == "text" && b.Text != "" && !isAnthropicBillingHeaderText(b.Text) {
 			parts = append(parts, ResponsesContentPart{Type: "input_text", Text: b.Text})
 		}
+		if b.Type == "document" {
+			textPart, imageURI := formatDocumentBlockAsText(b)
+			if imageURI != "" {
+				parts = append(parts, ResponsesContentPart{Type: "input_image", ImageURL: imageURI})
+			} else if textPart != "" {
+				parts = append(parts, ResponsesContentPart{Type: "input_text", Text: textPart})
+			}
+		}
 	}
 	return parts, nil
 }
@@ -238,6 +246,13 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 		case "image":
 			if uri := anthropicImageToDataURI(b.Source); uri != "" {
 				parts = append(parts, ResponsesContentPart{Type: "input_image", ImageURL: uri})
+			}
+		case "document":
+			textPart, imageURI := formatDocumentBlockAsText(b)
+			if imageURI != "" {
+				parts = append(parts, ResponsesContentPart{Type: "input_image", ImageURL: imageURI})
+			} else if textPart != "" {
+				parts = append(parts, ResponsesContentPart{Type: "input_text", Text: textPart})
 			}
 		}
 	}
@@ -341,6 +356,46 @@ func anthropicImageToDataURI(src *AnthropicImageSource) string {
 	return "data:" + mediaType + ";base64," + src.Data
 }
 
+// isImageMediaType reports whether the MIME type represents an image.
+func isImageMediaType(mediaType string) bool {
+	switch mediaType {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml":
+		return true
+	default:
+		return false
+	}
+}
+
+// formatDocumentBlockAsText converts an Anthropic document content block into
+// a text annotation for non-Anthropic upstreams. Text documents are inlined;
+// images are returned as a data URI (empty string if conversion doesn't apply);
+// other binary types get a placeholder description.
+func formatDocumentBlockAsText(b AnthropicContentBlock) (textPart string, imageDataURI string) {
+	title := b.Title
+	if title == "" {
+		title = "(unnamed file)"
+	}
+	if b.Source == nil || b.Source.Data == "" {
+		return fmt.Sprintf("[File: %s] (empty)", title), ""
+	}
+	switch b.Source.Type {
+	case "text":
+		if strings.TrimSpace(b.Source.Data) != "" {
+			return fmt.Sprintf("<file name='%s'>\n%s\n</file>", title, b.Source.Data), ""
+		}
+		return fmt.Sprintf("[File: %s] (empty)", title), ""
+	case "base64":
+		if isImageMediaType(b.Source.MediaType) {
+			uri := anthropicImageToDataURI(b.Source)
+			return "", uri
+		}
+		return fmt.Sprintf("[File: %s] (binary %s — content not available as text on this platform)",
+			title, b.Source.MediaType), ""
+	default:
+		return fmt.Sprintf("[File: %s] (unsupported source type)", title), ""
+	}
+}
+
 // convertToolResultOutput extracts text and image content from a tool_result
 // block. Returns the text as a string for the function_call_output Output
 // field, plus any image parts that must be sent in a separate user message
@@ -377,6 +432,13 @@ func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesConten
 		case "image":
 			if uri := anthropicImageToDataURI(ib.Source); uri != "" {
 				imageParts = append(imageParts, ResponsesContentPart{Type: "input_image", ImageURL: uri})
+			}
+		case "document":
+			textPart, imageURI := formatDocumentBlockAsText(ib)
+			if imageURI != "" {
+				imageParts = append(imageParts, ResponsesContentPart{Type: "input_image", ImageURL: imageURI})
+			} else if textPart != "" {
+				textParts = append(textParts, textPart)
 			}
 		}
 	}
